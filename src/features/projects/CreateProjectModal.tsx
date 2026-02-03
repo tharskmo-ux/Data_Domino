@@ -8,11 +8,20 @@ interface CreateProjectModalProps {
     onCreate: (project: { name: string, description: string, template: string }) => void;
 }
 
+import { useSubscription } from '../subscription/SubscriptionContext';
+import { useProjects } from './ProjectContext';
+import { Lock } from 'lucide-react';
+
 const CreateProjectModal: React.FC<CreateProjectModalProps> = ({ isOpen, onClose, onCreate }) => {
     const [name, setName] = useState('');
     const [description, setDescription] = useState('');
     const [template, setTemplate] = useState('custom');
     const [loading, setLoading] = useState(false);
+
+    // Feature Gating
+    const { checkAccess } = useSubscription();
+    const { projects } = useProjects();
+    const canCreateProject = checkAccess('unlimited_projects') || projects.length < 1;
 
     if (!isOpen) return null;
 
@@ -30,6 +39,31 @@ const CreateProjectModal: React.FC<CreateProjectModalProps> = ({ isOpen, onClose
             setTemplate('custom');
         }, 800);
     };
+
+    if (!canCreateProject) {
+        return (
+            <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 sm:p-6">
+                <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
+                <div className="relative w-full max-w-lg bg-zinc-900 border border-zinc-800 rounded-2xl shadow-2xl p-8 text-center animate-in fade-in zoom-in duration-200">
+                    <div className="w-16 h-16 bg-amber-500/10 rounded-full flex items-center justify-center mx-auto mb-6">
+                        <Lock className="h-8 w-8 text-amber-500" />
+                    </div>
+                    <h2 className="text-2xl font-bold text-white mb-2">Upgrade to Enterprise</h2>
+                    <p className="text-zinc-400 mb-8">
+                        You have reached the limit of 1 project on the Free tier. Upgrade to create unlimited projects and unlock advanced exports.
+                    </p>
+                    <div className="flex gap-4 justify-center">
+                        <button onClick={onClose} className="px-6 py-2.5 rounded-xl font-bold text-zinc-400 hover:text-white transition-colors">
+                            Cancel
+                        </button>
+                        <button onClick={() => alert("Please contact sales at harshad.am@enalsys.com to upgrade.")} className="px-8 py-2.5 bg-amber-600 hover:bg-amber-500 text-white rounded-xl font-bold transition-all shadow-lg shadow-amber-500/20">
+                            Contact to Upgrade
+                        </button>
+                    </div>
+                </div>
+            </div>
+        );
+    }
 
     return (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 sm:p-6">

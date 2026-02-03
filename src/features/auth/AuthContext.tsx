@@ -18,14 +18,27 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     useEffect(() => {
         if (IS_DEMO_MODE) {
-            // simulate a "demo" user for the mockup
-            setUser({
-                uid: 'demo-user',
-                email: 'demo@example.com',
-                displayName: 'Demo User',
-            } as User);
+            const role = localStorage.getItem('demo_role') || 'admin';
+
+            if (role === 'admin') {
+                setUser({
+                    uid: 'admin-user',
+                    email: 'harshad.am@enalsys.com',
+                    displayName: 'Harshad (Admin)',
+                } as User);
+            } else {
+                setUser({
+                    uid: 'demo-user',
+                    email: 'user@test.com',
+                    displayName: 'Harshad',
+                } as User);
+            }
             setLoading(false);
-            return;
+
+            // Listen for storage events to reload on role switch
+            const handleStorageChange = () => window.location.reload();
+            window.addEventListener('storage', handleStorageChange);
+            return () => window.removeEventListener('storage', handleStorageChange);
         }
 
         const unsubscribe = onAuthStateChanged(auth, (user) => {

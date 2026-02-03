@@ -1,17 +1,43 @@
-import React, { useState } from 'react';
-import { Database, UserCircle2, BarChart3, ChevronRight, FileCheck2, FileText, Layers, ShieldCheck } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Database, ChevronRight, FileCheck2 } from 'lucide-react';
 import { useProjects } from './ProjectContext';
 import FileUpload from '../etl/FileUpload';
 import type { FileMetadata } from '../etl/FileUpload';
 import ColumnMapper from '../etl/ColumnMapper';
 import SupplierMatching from '../etl/SupplierMatching';
+import CategoryMapper from '../etl/CategoryMapper';
 import AnalyticsDashboard from '../etl/AnalyticsDashboard';
 import { motion } from 'framer-motion';
 import { cn } from '../../lib/utils';
 import AppSidebar, { type ETLStep } from '../../components/AppSidebar';
+import DataProfiling from '../etl/DataProfiling';
+import ActivityHistory from '../etl/ActivityHistory';
+import { useSubscription } from '../subscription/SubscriptionContext';
+import { Lock, FileDown } from 'lucide-react';
+
+const ExportButton = () => {
+    const { checkAccess } = useSubscription();
+    const canExport = checkAccess('advanced_export');
+
+    return (
+        <button
+            onClick={() => !canExport && alert("Upgrade to Enterprise to export detailed reports.")}
+            className={cn(
+                "px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-2",
+                canExport
+                    ? "bg-zinc-800 hover:bg-zinc-700 text-white"
+                    : "bg-zinc-900 text-zinc-600 cursor-not-allowed border border-zinc-800"
+            )}
+        >
+            {!canExport && <Lock className="h-3 w-3" />}
+            <FileDown className="h-4 w-4" />
+            Export
+        </button>
+    );
+};
 
 const ProjectView: React.FC = () => {
-    const { currentProject, setCurrentProject } = useProjects();
+    const { currentProject, setCurrentProject, updateProject, addActivity, updateProjectCache, projectDataCache } = useProjects();
     const [activeStep, setActiveStep] = useState<ETLStep>('dashboard');
     const [isProcessing, setIsProcessing] = useState(false);
 
@@ -32,6 +58,57 @@ const ProjectView: React.FC = () => {
         fileMeta: undefined
     });
 
+    // Initialize state from existing project
+    useEffect(() => {
+        if (currentProject) {
+            // Restore active step based on status
+            if (currentProject.status === 'completed') {
+                setActiveStep('dashboard');
+            } else if (currentProject.status === 'draft') {
+                setActiveStep('dashboard'); // Default to start (Upload view) if draft
+            }
+
+            // Restore Currency
+            if (currentProject.currency && currentProject.currency !== projectData.currency) {
+                setProjectData(prev => ({ ...prev, currency: currentProject.currency! }));
+            }
+
+            // Restore from Session Cache
+            if (projectDataCache[currentProject.id]) {
+                const cached = projectDataCache[currentProject.id];
+                setProjectData(prev => ({ ...prev, ...cached }));
+                // If we have data, ensure we are not stuck on upload
+                if (cached.raw && cached.raw.length > 0 && activeStep === 'dashboard' && currentProject.status === 'draft') {
+                    // Logic allows dashboard, so we are good.
+                }
+            } else {
+                // No cache found (New Project or Refresh) - Explicitly reset data to prevent checking previous state
+                setProjectData({
+                    raw: [],
+                    headers: [],
+                    mappings: {},
+                    currency: currentProject.currency || 'INR',
+                    clusters: [],
+                    fileMeta: undefined
+                });
+
+                // Reset to upload view for drafts
+                if (currentProject.status === 'draft') {
+                    setActiveStep('dashboard');
+                }
+            }
+
+            // In a real app, we would re-hydrate the projectData from the backend here.
+            // Since we don't have a backend, we rely on the in-memory state if available,
+            // or the user has to re-upload. This is a known limitation of this prototype.
+            // However, we can at least show the dashboard if stats are present.
+            if (currentProject.status === 'completed' && currentProject.stats) {
+                // Mock re-hydration for demo purposes if raw data is missing but stats exist
+                // (Ideally, we'd fetch raw data from IDB or API)
+            }
+        }
+    }, [currentProject?.id]);
+
     if (!currentProject) return null;
 
     const handleUploadComplete = (data: any[], metadata: FileMetadata) => {
@@ -49,26 +126,67 @@ const ProjectView: React.FC = () => {
             if (h.includes('amount') || h.includes('val') || h.includes('sum')) initialMappings['amount'] = header;
             if (h.includes('vendor') || h.includes('supplier') || h.includes('name')) initialMappings['supplier'] = header;
             if (h.includes('currency') || h.includes('curr')) initialMappings['currency'] = header;
-            if (h.includes('cat') || h.includes('dept')) initialMappings['category'] = header;
+            // Multi-level category detection
+            if (h.includes('l1') || h.includes('segment') || (h.includes('cat') && !h.includes('sub'))) initialMappings['category_l1'] = header;
+            if (h.includes('l2') || h.includes('family') || h.includes('sub')) initialMappings['category_l2'] = header;
+            if (h.includes('l3') || h.includes('class') || h.includes('commodity')) initialMappings['category_l3'] = header;
+
+            // Fallback for simple 'category' to L1
+            if (!initialMappings['category_l1'] && (h.includes('cat') || h.includes('dept'))) initialMappings['category_l1'] = header;
+
             if (h.includes('po') || h.includes('order')) initialMappings['po_number'] = header;
             if (h.includes('plant') || h.includes('facility')) initialMappings['plant'] = header;
             if (h.includes('loc')) initialMappings['location'] = header;
+            if (h.includes('item') || h.includes('desc') || h.includes('sku') || h.includes('part')) initialMappings['item_description'] = header;
+            if (h.includes('contract') || h.includes('agreement')) initialMappings['contract_ref'] = header;
+            if (h.includes('qty') || h.includes('quantity') || h.includes('units') || h.includes('count')) initialMappings['quantity'] = header;
+            if (h.includes('price') || h.includes('rate') || (h.includes('unit') && (h.includes('cost') || h.includes('price')))) initialMappings['unit_price'] = header;
         });
 
         console.log('Auto-mappings generated:', initialMappings);
 
-        setProjectData(prev => ({
-            ...prev,
+        const newData = {
             raw: data,
             headers,
-            mappings: initialMappings, // Set initial mappings immediately
+            mappings: initialMappings,
             fileMeta: metadata
+        };
+
+        setProjectData(prev => ({
+            ...prev,
+            ...newData
         }));
+
+        if (currentProject) updateProjectCache(currentProject.id, newData);
+
+        // Keep isProcessing as true to show the loading overlay
+        // and immediately set activeStep to 'mapping' so that when isProcessing becomes false,
+        // it renders the ColumnMapper, not the AnalyticsDashboard.
+        setActiveStep('mapping');
 
         // Simulate ETL Engine Background Processing
         setTimeout(() => {
             setIsProcessing(false);
-            setActiveStep('mapping'); // Auto-redirect to mapping to confirm
+            setActiveStep('mapping'); // User Request: Upload -> Mapping
+
+            if (currentProject) {
+                updateProject(currentProject.id, {
+                    stats: {
+                        spend: 0,
+                        quality: metadata.quality,
+                        transactions: data.length,
+                        categoriesCount: 0,
+                        suppliersCount: 0
+                    }
+                });
+
+                addActivity(currentProject.id, {
+                    type: 'upload',
+                    label: 'Advanced Data Ingestion Complete',
+                    details: `Successfully ingested ${data.length} records with ${headers.length} columns.`,
+                    metadata: { rowCount: data.length, colCount: headers.length }
+                });
+            }
         }, 2000);
     };
 
@@ -139,6 +257,18 @@ const ProjectView: React.FC = () => {
         // Simulate deeper processing/matching setup
         setTimeout(() => {
             setIsProcessing(false);
+            if (currentProject) {
+                updateProject(currentProject.id, {
+                    currency: globalCurrency,
+                    stats: { ...currentProject.stats } // Ensure we don't wipe stats if they exist, though updateProject does a merge usually.
+                });
+
+                addActivity(currentProject.id, {
+                    type: 'mapping',
+                    label: 'Column Mapping Finalized',
+                    details: `Mapped source fields to system taxonomy.`,
+                });
+            }
             setActiveStep('matching');
         }, 2500);
     };
@@ -152,8 +282,79 @@ const ProjectView: React.FC = () => {
 
         setTimeout(() => {
             setIsProcessing(false);
-            setActiveStep('dashboard'); // Redirect to dashboard after matching
+            if (currentProject) {
+                addActivity(currentProject.id, {
+                    type: 'matching',
+                    label: 'Supplier Matching Complete',
+                    details: `Identified and grouped supplier clusters for review.`,
+                });
+            }
+            setActiveStep('categorization'); // Redirect to merged categorization step
         }, 2000);
+    };
+
+    const handleCategoryComplete = (updatedData: any[]) => {
+        setIsProcessing(true);
+        setProjectData(prev => ({
+            ...prev,
+            raw: updatedData
+        }));
+
+        // Calculate and save project stats
+        const amountCol = projectData.mappings['amount'];
+        const supplierCol = projectData.mappings['supplier'];
+        const categoryCol = projectData.mappings['category_l1'] || projectData.mappings['category'] || 'category';
+
+        const totalSpend = updatedData.reduce((acc, row) => {
+            let val = 0;
+            if (amountCol && row[amountCol]) {
+                const s = String(row[amountCol]).replace(/[^0-9.-]+/g, "");
+                val = parseFloat(s) || 0;
+            }
+            return acc + val;
+        }, 0);
+
+        const uniqueSuppliers = new Set(updatedData.map(r => r[supplierCol])).size;
+        const uniqueCategories = new Set(updatedData.map(r => r[categoryCol])).size;
+
+        updateProject(currentProject.id, {
+            status: 'completed',
+            stats: {
+                spend: totalSpend,
+                quality: projectData.fileMeta?.quality || 95,
+                transactions: updatedData.length,
+                categoriesCount: uniqueCategories,
+                suppliersCount: uniqueSuppliers
+            }
+        });
+
+        if (currentProject) {
+            addActivity(currentProject.id, {
+                type: 'categorization',
+                label: 'Spend Categorization Finalized',
+                details: 'Applied hierarchies across all identified suppliers.',
+            });
+        }
+
+        setTimeout(() => {
+            setIsProcessing(false);
+            setActiveStep('data-quality'); // User Request: Categorization -> Data Quality -> Dashboard
+        }, 1500);
+    };
+
+    const handleDataQualityComplete = () => {
+        setIsProcessing(true);
+        // Finalize quality checks
+        if (currentProject) {
+            updateProject(currentProject.id, { status: 'completed' });
+            // Ensure cache is up to date
+            updateProjectCache(currentProject.id, projectData);
+        }
+
+        setTimeout(() => {
+            setIsProcessing(false);
+            setActiveStep('dashboard'); // Final Step
+        }, 1000);
     };
 
     return (
@@ -191,6 +392,8 @@ const ProjectView: React.FC = () => {
                                 if (activeStep === 'dashboard' && projectData.fileMeta) setActiveStep('mapping');
                                 else if (activeStep === 'mapping') handleMappingComplete(projectData.mappings, projectData.currency);
                                 else if (activeStep === 'matching') handleMatchingComplete(projectData.clusters);
+                                else if (activeStep === 'categorization') handleCategoryComplete(projectData.raw);
+                                else if (activeStep === 'data-quality') handleDataQualityComplete();
                                 else if (activeStep === 'dashboard') alert('Dashboard is active.');
                                 else alert('Please complete the current step first.');
                             }}
@@ -198,6 +401,9 @@ const ProjectView: React.FC = () => {
                         >
                             Run Step
                         </button>
+
+                        {/* Gated Export Button */}
+                        <ExportButton />
                     </div>
                 </header>
 
@@ -208,7 +414,7 @@ const ProjectView: React.FC = () => {
                     )}>
                         {activeStep === 'dashboard' && (
                             <>
-                                {projectData.raw.length === 0 ? (
+                                {(projectData.raw.length === 0 && currentProject.status !== 'completed') ? (
                                     <div className="space-y-10 animate-in fade-in slide-in-from-bottom-4 duration-500">
                                         <div>
                                             <h1 className="text-4xl font-bold mb-3 tracking-tight">Step 1: Data Ingestion</h1>
@@ -223,6 +429,8 @@ const ProjectView: React.FC = () => {
                                         data={projectData.raw}
                                         mappings={projectData.mappings}
                                         clusters={projectData.clusters}
+                                        currency={projectData.currency}
+                                        projectStats={currentProject.stats}
                                     />
                                 )}
                             </>
@@ -236,47 +444,23 @@ const ProjectView: React.FC = () => {
                             >
                                 <div className="flex justify-between items-center mb-8">
                                     <div>
-                                        <h3 className="text-xl font-bold">Ingested File Details</h3>
-                                        <p className="text-xs text-zinc-500 mt-1 uppercase tracking-widest font-bold">Metadata Snapshot</p>
+                                        <h3 className="text-xl font-bold">Data Quality Assessment</h3>
+                                        <p className="text-xs text-zinc-500 mt-1 uppercase tracking-widest font-bold">Deep Profiling Metrics</p>
                                     </div>
                                 </div>
 
-                                <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
-                                    <div className="p-5 bg-zinc-950/50 rounded-2xl border border-zinc-900/50">
-                                        <div className="flex items-center gap-3 mb-3 text-zinc-500">
-                                            <Database className="h-4 w-4" />
-                                            <span className="text-[10px] font-black uppercase tracking-widest">File Identity</span>
-                                        </div>
-                                        <div className="text-sm font-bold text-white truncate">{projectData.fileMeta.name}</div>
-                                        <div className="text-[10px] text-zinc-600 font-bold mt-1 uppercase tracking-wider">{projectData.fileMeta.type}</div>
-                                    </div>
+                                <DataProfiling
+                                    data={projectData.raw}
+                                    headers={projectData.headers}
+                                />
 
-                                    <div className="p-5 bg-zinc-950/50 rounded-2xl border border-zinc-900/50">
-                                        <div className="flex items-center gap-3 mb-3 text-zinc-500">
-                                            <FileText className="h-4 w-4" />
-                                            <span className="text-[10px] font-black uppercase tracking-widest">Storage & Tech</span>
-                                        </div>
-                                        <div className="text-sm font-bold text-white">{projectData.fileMeta.format} Format</div>
-                                        <div className="text-[10px] text-zinc-600 font-bold mt-1 uppercase tracking-wider">{projectData.fileMeta.size} Payload</div>
-                                    </div>
-
-                                    <div className="p-5 bg-zinc-950/50 rounded-2xl border border-zinc-900/50">
-                                        <div className="flex items-center gap-3 mb-3 text-zinc-500">
-                                            <Layers className="h-4 w-4" />
-                                            <span className="text-[10px] font-black uppercase tracking-widest">Record Volume</span>
-                                        </div>
-                                        <div className="text-sm font-bold text-white">{projectData.fileMeta.rows.toLocaleString()} Rows</div>
-                                        <div className="text-[10px] text-zinc-600 font-bold mt-1 uppercase tracking-wider">{projectData.fileMeta.cols} Columns Found</div>
-                                    </div>
-
-                                    <div className="p-5 bg-zinc-950/50 rounded-2xl border border-zinc-900/50">
-                                        <div className="flex items-center gap-3 mb-3 text-emerald-500/70">
-                                            <ShieldCheck className="h-4 w-4" />
-                                            <span className="text-[10px] font-black uppercase tracking-widest">Signal Quality</span>
-                                        </div>
-                                        <div className="text-sm font-bold text-white">{projectData.fileMeta.quality}% Valid</div>
-                                        <div className="text-[10px] text-zinc-600 font-bold mt-1 uppercase tracking-wider">Low Noise Identified</div>
-                                    </div>
+                                <div className="mt-12 flex justify-end">
+                                    <button
+                                        onClick={handleDataQualityComplete}
+                                        className="px-8 py-4 bg-emerald-600 text-white rounded-2xl font-bold flex items-center gap-2 shadow-xl shadow-emerald-500/20 hover:scale-[1.02] transition-all"
+                                    >
+                                        Finalize Project <FileCheck2 className="h-5 w-5" />
+                                    </button>
                                 </div>
                             </motion.div>
                         )}
@@ -298,16 +482,22 @@ const ProjectView: React.FC = () => {
                         )}
 
                         {activeStep === 'categorization' && (
-                            <AnalyticsDashboard
+                            <CategoryMapper
                                 data={projectData.raw}
                                 mappings={projectData.mappings}
-                                clusters={projectData.clusters}
-                                initialTab="categorization"
+                                onComplete={handleCategoryComplete}
+                                currency={projectData.currency}
                             />
                         )}
-                    </div >
-                </div >
-            </main >
+
+                        {activeStep === 'history' && (
+                            <ActivityHistory
+                                activities={currentProject.activities || []}
+                            />
+                        )}
+                    </div>
+                </div>
+            </main>
         </div >
     );
 };

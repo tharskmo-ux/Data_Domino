@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { UserCircle2, Check, Search, Filter, AlertTriangle, Info, ArrowRight, Trash2, Edit3 } from 'lucide-react';
+import { UserCircle2, Check, Search, Filter, AlertTriangle, Info, ArrowRight, Trash2, Edit3, Zap } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { cn } from '../../lib/utils';
 
@@ -157,12 +157,39 @@ const SupplierMatching: React.FC<SupplierMatchingProps> = ({ onComplete, data, m
                     </p>
                 </div>
 
-                <button
-                    onClick={() => onComplete(groups)}
-                    className="bg-primary hover:bg-primary/90 text-white px-6 py-3 rounded-2xl font-bold flex items-center justify-center gap-2 transition-all shadow-xl shadow-primary/20"
-                >
-                    Finalize Matching <ArrowRight className="h-5 w-5" />
-                </button>
+                <div className="flex gap-3">
+                    <button
+                        onClick={() => {
+                            // Aggressive Dedupe Simulation
+                            alert('Scanning for probabilistic duplicates... 5 additional clusters identified for review.');
+                            setGroups(prev => {
+                                // Simulate merging two clusters
+                                if (prev.length < 2) return prev;
+                                const first = prev[0];
+                                const second = prev[prev.length - 1];
+                                const merged = {
+                                    ...first,
+                                    masterName: `${first.masterName} (Merged)`,
+                                    variants: [...first.variants, ...second.variants],
+                                    totalSpend: first.totalSpend + second.totalSpend,
+                                    transactionCount: first.transactionCount + second.transactionCount,
+                                    confidence: 'Low' as const,
+                                    score: 45
+                                };
+                                return [merged, ...prev.slice(1, prev.length - 1)];
+                            });
+                        }}
+                        className="px-6 py-3 bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-white rounded-2xl font-bold flex items-center justify-center gap-2 transition-all"
+                    >
+                        <Zap className="h-4 w-4 text-amber-500" /> Run Smart Dedupe
+                    </button>
+                    <button
+                        onClick={() => onComplete(groups)}
+                        className="bg-primary hover:bg-primary/90 text-white px-6 py-3 rounded-2xl font-bold flex items-center justify-center gap-2 transition-all shadow-xl shadow-primary/20"
+                    >
+                        Finalize Matching <ArrowRight className="h-5 w-5" />
+                    </button>
+                </div>
             </div>
 
             <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-12 gap-8 pb-10">

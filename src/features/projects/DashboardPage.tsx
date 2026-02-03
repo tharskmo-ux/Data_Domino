@@ -1,13 +1,14 @@
 import { useAuth } from '../auth/AuthContext';
 import { auth } from '../../lib/firebase';
 import { signOut } from 'firebase/auth';
-import { LogOut, Plus, FolderOpen, TrendingUp, ShieldCheck, Clock, Trash2, ArrowRight } from 'lucide-react';
-import { useState } from 'react';
+import { LogOut, Plus, FolderOpen, TrendingUp, ShieldCheck, Clock, Trash2, ArrowRight, Users, Target } from 'lucide-react';
+import { useState, useEffect } from 'react';
 import CreateProjectModal from './CreateProjectModal';
 import ProjectView from './ProjectView';
 import { useProjects } from './ProjectContext';
 import AppSidebar, { type ETLStep } from '../../components/AppSidebar';
 import { motion } from 'framer-motion';
+import ActivityHistory from '../etl/ActivityHistory';
 
 const DashboardPage = () => {
     const { user, isDemo } = useAuth();
@@ -15,9 +16,32 @@ const DashboardPage = () => {
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [activeGlobalView, setActiveGlobalView] = useState<ETLStep>('dashboard');
 
+    useEffect(() => {
+        const params = new URLSearchParams(window.location.search);
+        if (params.get('share')) {
+            const mockProject: any = {
+                id: 'shared-view',
+                name: params.get('project') || 'Shared Project',
+                description: 'Read-only view of project analytics',
+                status: 'completed',
+                currency: 'INR',
+                createdAt: new Date().toISOString(),
+                stats: {
+                    spend: 12500000,
+                    quality: 98,
+                    transactions: 1450,
+                    categoriesCount: 12,
+                    suppliersCount: 45
+                },
+                activities: []
+            };
+            setCurrentProject(mockProject);
+        }
+    }, [setCurrentProject]);
+
     // If a project is selected, show the project workspace instead of the dashboard
     if (currentProject) {
-        return <ProjectView />;
+        return <ProjectView key={currentProject.id} />;
     }
 
     const handleSignOut = () => {
@@ -63,6 +87,34 @@ const DashboardPage = () => {
                 </div>
 
                 <div className="flex items-center gap-4">
+                    {/* Admin Access Button */}
+                    {/* Show for Harshad OR if we are in Demo Mode for testing */}
+                    {/* Admin Access Button - STRICTLY restricted to Harshad */}
+                    {user?.email === 'harshad.am@enalsys.com' && (
+                        <div className="flex gap-2">
+                            {/* Admin Testing Tool: Quickly verify what a user sees */}
+                            {isDemo && (
+                                <button
+                                    onClick={() => {
+                                        localStorage.setItem('demo_role', 'user');
+                                        window.location.reload();
+                                    }}
+                                    className="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-white rounded-lg text-xs font-bold uppercase tracking-wider border border-zinc-700 transition-all"
+                                >
+                                    Test User View
+                                </button>
+                            )}
+
+                            <a
+                                href="/admin"
+                                className="flex items-center gap-2 px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-amber-500 rounded-lg text-xs font-bold uppercase tracking-wider border border-amber-500/20 transition-all"
+                            >
+                                <ShieldCheck className="h-4 w-4" />
+                                Super Admin
+                            </a>
+                        </div>
+                    )}
+
                     <div className="flex flex-col items-end mr-2">
                         <span className="text-sm font-medium text-zinc-200">{user?.displayName || 'User'}</span>
                         <span className="text-[10px] text-zinc-500 font-medium">{user?.email}</span>
@@ -178,10 +230,37 @@ const DashboardPage = () => {
                                                         </div>
                                                     </div>
 
-                                                    <h3 className="text-xl font-bold mb-2 group-hover:text-primary transition-colors pr-8">{project.name}</h3>
-                                                    <p className="text-zinc-500 text-sm line-clamp-2 mb-8 h-10 leading-relaxed">
-                                                        {project.description || 'No description provided for this project.'}
+                                                    <h3 className="text-xl font-bold mb-1 group-hover:text-primary transition-colors pr-8">{project.name}</h3>
+                                                    <p className="text-zinc-500 text-xs mb-6 h-8 line-clamp-2">
+                                                        {project.description || 'No description provided.'}
                                                     </p>
+
+                                                    <div className="grid grid-cols-2 gap-4 mb-6">
+                                                        <div className="bg-zinc-950/50 rounded-xl p-3 border border-zinc-800">
+                                                            <div className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest mb-1">Total Spend</div>
+                                                            <div className="text-lg font-bold text-white font-mono">
+                                                                {new Intl.NumberFormat('en-IN', { style: 'currency', currency: project.currency || 'INR', notation: 'compact' }).format(project.stats?.spend || 0)}
+                                                            </div>
+                                                        </div>
+                                                        <div className="bg-zinc-950/50 rounded-xl p-3 border border-zinc-800">
+                                                            <div className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest mb-1">Data Quality</div>
+                                                            <div className={`text-lg font-bold font-mono ${project.stats?.quality > 90 ? 'text-emerald-500' : 'text-amber-500'}`}>
+                                                                {project.stats?.quality || 0}%
+                                                            </div>
+                                                        </div>
+                                                    </div>
+
+                                                    <div className="flex items-center gap-4 text-xs font-medium text-zinc-400 mb-2">
+                                                        <div className="flex items-center gap-1.5">
+                                                            <Users className="h-3.5 w-3.5 text-zinc-600" />
+                                                            <span>{project.stats?.suppliersCount || 0} Vendors</span>
+                                                        </div>
+                                                        <div className="w-1 h-1 bg-zinc-800 rounded-full" />
+                                                        <div className="flex items-center gap-1.5">
+                                                            <Target className="h-3.5 w-3.5 text-zinc-600" />
+                                                            <span>{project.stats?.categoriesCount || 0} Categories</span>
+                                                        </div>
+                                                    </div>
 
                                                     <div className="flex items-center justify-between pt-4 border-t border-zinc-800/50">
                                                         <div className="flex items-center gap-2 text-xs font-medium text-zinc-500">
@@ -200,8 +279,22 @@ const DashboardPage = () => {
                             </motion.div>
                         )}
 
+                        {activeGlobalView === 'history' && (
+                            <div className="space-y-8 animate-in fade-in duration-500">
+                                <div className="flex justify-between items-end mb-6">
+                                    <div>
+                                        <h2 className="text-3xl font-bold mb-2">Global Activity Feed</h2>
+                                        <p className="text-zinc-500 text-lg">Audit trail across all procurement projects</p>
+                                    </div>
+                                </div>
+                                <ActivityHistory
+                                    activities={projects.flatMap(p => (p.activities || []).map(a => ({ ...a, label: `[${p.name}] ${a.label}` }))).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())}
+                                />
+                            </div>
+                        )}
+
                         {/* GLOBAL SUMMARY VIEWS (Placeholders) */}
-                        {activeGlobalView !== 'dashboard' && (
+                        {activeGlobalView !== 'dashboard' && activeGlobalView !== 'history' && (
                             <div className="flex flex-col items-center justify-center h-[60vh] text-center space-y-6">
                                 <div className="w-20 h-20 bg-zinc-900 rounded-full flex items-center justify-center border border-zinc-800">
                                     {activeGlobalView === 'data-quality' && <ShieldCheck className="h-10 w-10 text-emerald-500" />}
@@ -228,6 +321,7 @@ const DashboardPage = () => {
                     </div>
                 </main>
             </div>
+
 
             <CreateProjectModal
                 isOpen={isModalOpen}

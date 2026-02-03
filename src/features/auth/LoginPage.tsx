@@ -22,9 +22,13 @@ const LoginPage = () => {
         if (isDemo) {
             // Mock login delay
             setTimeout(() => {
-                navigate('/');
-                setLoading(false);
-            }, 1000);
+                // UPDATE DEMO ROLE BASED ON EMAIL INPUT
+                const role = email === 'harshad.am@enalsys.com' ? 'admin' : 'user';
+                localStorage.setItem('demo_role', role);
+
+                // Force reload to pick up new AuthContext state
+                window.location.href = '/';
+            }, 800);
             return;
         }
 

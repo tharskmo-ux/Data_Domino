@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ArrowRight, Check, AlertCircle, HelpCircle, Save } from 'lucide-react';
+import { ArrowRight, Check, AlertCircle, HelpCircle, Save, FolderOpen, Trash2, Wallet } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { cn } from '../../lib/utils';
 
@@ -16,12 +16,19 @@ const SYSTEM_FIELDS: MappingField[] = [
     { id: 'amount', name: 'Total Amount', required: true, description: 'Total value including taxes.' },
     { id: 'supplier', name: 'Supplier Name', required: true, description: 'Legal name of the vendor.' },
     { id: 'currency', name: 'Currency', required: false, description: 'ISO code or symbol (e.g., INR, $).' },
-    { id: 'category', name: 'Category L1', required: false, description: 'High-level procurement category.' },
+    { id: 'category_l1', name: 'Category L1', required: false, description: 'High-level procurement category.' },
+    { id: 'category_l2', name: 'Category L2', required: false, description: 'Mid-level procurement category.' },
+    { id: 'category_l3', name: 'Category L3', required: false, description: 'Detailed procurement category.' },
     { id: 'gl_account', name: 'GL Account', required: false, description: 'General Ledger account code.' },
     { id: 'plant', name: 'Plant Name', required: false, description: 'Manufacturing or storage facility name.' },
     { id: 'location', name: 'Location', required: false, description: 'Geographic location or branch.' },
+    { id: 'business_unit', name: 'Business Unit', required: false, description: 'Internal division or business entity.' },
     { id: 'buyer', name: 'User/Buyer', required: false, description: 'Person or department responsible.' },
     { id: 'po_number', name: 'PO Number', required: false, description: 'Purchase Order identifier.' },
+    { id: 'contract_ref', name: 'Contract Ref', required: false, description: 'Identifier for a valid contract.' },
+    { id: 'item_description', name: 'Item Description', required: false, description: 'Part name, SKU, or clear description.' },
+    { id: 'quantity', name: 'Quantity', required: false, description: 'Number of units purchased.' },
+    { id: 'unit_price', name: 'Unit Price', required: false, description: 'Price per unit.' },
 ];
 
 interface ColumnMapperProps {
@@ -46,18 +53,46 @@ const ColumnMapper: React.FC<ColumnMapperProps> = ({ onConfirm, headers, initial
             if (h.includes('amount') || h.includes('val') || h.includes('sum')) initial['amount'] = header;
             if (h.includes('vendor') || h.includes('supplier') || h.includes('name')) initial['supplier'] = header;
             if (h.includes('currency') || h.includes('curr')) initial['currency'] = header;
-            if (h.includes('cat') || h.includes('dept')) initial['category'] = header;
+            if (h.includes('cat') || h.includes('dept')) initial['category_l1'] = header;
             if (h.includes('po') || h.includes('order')) initial['po_number'] = header;
             if (h.includes('plant') || h.includes('facility')) initial['plant'] = header;
-            if (h.includes('loc')) initial['location'] = header;
+            if (h.includes('loc') || h.includes('city') || h.includes('region')) initial['location'] = header;
+            if (h.includes('bu') || h.includes('unit') || h.includes('division')) initial['business_unit'] = header;
+            if (h.includes('contract') || h.includes('agreement')) initial['contract_ref'] = header;
+            if (h.includes('item') || h.includes('desc') || h.includes('sku') || h.includes('part')) initial['item_description'] = header;
         });
 
         return initial;
     });
     const [globalCurrency, setGlobalCurrency] = useState('INR');
+    const [templates, setTemplates] = useState<Record<string, Record<string, string>>>(() => {
+        const saved = localStorage.getItem('domino_mapping_templates');
+        return saved ? JSON.parse(saved) : {};
+    });
+    const [templateName, setTemplateName] = useState('');
 
     const handleMap = (fieldId: string, header: string) => {
         setMappings(prev => ({ ...prev, [fieldId]: header }));
+    };
+
+    const saveTemplate = () => {
+        if (!templateName.trim()) return;
+        const newTemplates = { ...templates, [templateName]: mappings };
+        setTemplates(newTemplates);
+        localStorage.setItem('domino_mapping_templates', JSON.stringify(newTemplates));
+        setTemplateName('');
+        alert(`Template "${templateName}" saved!`);
+    };
+
+    const loadTemplate = (name: string) => {
+        setMappings(templates[name]);
+    };
+
+    const deleteTemplate = (name: string) => {
+        const newTemplates = { ...templates };
+        delete newTemplates[name];
+        setTemplates(newTemplates);
+        localStorage.setItem('domino_mapping_templates', JSON.stringify(newTemplates));
     };
 
     const isCurrencyMapped = !!mappings['currency'];
@@ -76,28 +111,6 @@ const ColumnMapper: React.FC<ColumnMapperProps> = ({ onConfirm, headers, initial
                         Align your spreadsheet headers with Data Domino's intelligence engine.
                     </p>
                 </div>
-
-                {!isCurrencyMapped && (
-                    <div className="bg-amber-500/10 border border-amber-500/20 rounded-2xl p-4 flex items-center gap-4 animate-in fade-in zoom-in duration-300">
-                        <div className="w-10 h-10 bg-amber-500/20 rounded-xl flex items-center justify-center text-amber-500 flex-shrink-0">
-                            <AlertCircle className="h-5 w-5" />
-                        </div>
-                        <div>
-                            <label className="block text-[10px] font-bold text-amber-500 uppercase tracking-widest mb-1">Currency Fallback</label>
-                            <select
-                                value={globalCurrency}
-                                onChange={(e) => setGlobalCurrency(e.target.value)}
-                                className="bg-transparent border-none text-white font-bold text-sm focus:ring-0 p-0 cursor-pointer"
-                            >
-                                <option value="INR" className="bg-zinc-900">INR - Indian Rupee</option>
-                                <option value="USD" className="bg-zinc-900">USD - US Dollar</option>
-                                <option value="EUR" className="bg-zinc-900">EUR - Euro</option>
-                                <option value="GBP" className="bg-zinc-900">GBP - British Pound</option>
-                                <option value="JPY" className="bg-zinc-900">JPY - Japanese Yen</option>
-                            </select>
-                        </div>
-                    </div>
-                )}
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
@@ -130,24 +143,43 @@ const ColumnMapper: React.FC<ColumnMapperProps> = ({ onConfirm, headers, initial
                                     <div className="flex-1 flex items-center gap-4">
                                         <ArrowRight className="h-4 w-4 text-zinc-700" />
 
-                                        <select
-                                            value={mappings[field.id] || ''}
-                                            onChange={(e) => handleMap(field.id, e.target.value)}
-                                            className={cn(
-                                                "flex-1 bg-zinc-950 border rounded-xl py-2 px-4 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all cursor-pointer",
-                                                mappings[field.id]
-                                                    ? "border-primary/50 text-white"
-                                                    : "border-zinc-800 text-zinc-500"
-                                            )}
-                                        >
-                                            <option value="">Select source column...</option>
-                                            {headers.map(h => (
-                                                <option key={h} value={h}>{h}</option>
-                                            ))}
-                                        </select>
+                                        {field.id === 'currency' ? (
+                                            <div className="flex-1 relative">
+                                                <select
+                                                    value={globalCurrency}
+                                                    onChange={(e) => setGlobalCurrency(e.target.value)}
+                                                    className="w-full bg-zinc-950 border border-primary/50 rounded-xl py-2 px-4 text-sm text-primary font-bold focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all cursor-pointer appearance-none"
+                                                >
+                                                    <option value="INR">INR - Indian Rupee (₹)</option>
+                                                    <option value="USD">USD - US Dollar ($)</option>
+                                                    <option value="EUR">EUR - Euro (€)</option>
+                                                    <option value="GBP">GBP - British Pound (£)</option>
+                                                    <option value="JPY">JPY - Japanese Yen (¥)</option>
+                                                </select>
+                                                <Wallet className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-primary pointer-events-none" />
+                                            </div>
+                                        ) : (
+                                            <select
+                                                value={mappings[field.id] || ''}
+                                                onChange={(e) => handleMap(field.id, e.target.value)}
+                                                className={cn(
+                                                    "flex-1 bg-zinc-950 border rounded-xl py-2 px-4 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all cursor-pointer",
+                                                    mappings[field.id]
+                                                        ? "border-primary/50 text-white"
+                                                        : "border-zinc-800 text-zinc-500"
+                                                )}
+                                            >
+                                                <option value="">Select source column...</option>
+                                                {headers.map(h => (
+                                                    <option key={h} value={h}>{h}</option>
+                                                ))}
+                                            </select>
+                                        )}
 
                                         <div className="w-6 h-6 flex items-center justify-center">
-                                            {mappings[field.id] ? (
+                                            {field.id === 'currency' ? (
+                                                <Check className="h-4 w-4 text-emerald-500" />
+                                            ) : mappings[field.id] ? (
                                                 <Check className="h-4 w-4 text-emerald-500" />
                                             ) : field.id === 'currency' ? (
                                                 <HelpCircle className="h-4 w-4 text-amber-500" />
@@ -172,12 +204,16 @@ const ColumnMapper: React.FC<ColumnMapperProps> = ({ onConfirm, headers, initial
                             Our AI has automatically matched <span className="text-primary font-bold">{Object.keys(mappings).length} fields</span> based on common procurement naming conventions.
                         </p>
                         <div className="space-y-3">
-                            {Object.entries(mappings).slice(0, 3).map(([fieldId, header]) => (
-                                <div key={fieldId} className="flex items-center gap-3 p-3 bg-primary/5 rounded-xl border border-primary/10">
-                                    <div className="h-2 w-2 rounded-full bg-primary" />
-                                    <span className="text-xs text-zinc-300">"{header}" → {SYSTEM_FIELDS.find(f => f.id === fieldId)?.name}</span>
-                                </div>
-                            ))}
+                            {Object.entries(mappings).slice(0, 3).map(([fieldId, header]) => {
+                                const field = SYSTEM_FIELDS.find(f => f.id === fieldId);
+                                if (!field) return null;
+                                return (
+                                    <div key={fieldId} className="flex items-center gap-3 p-3 bg-primary/5 rounded-xl border border-primary/10">
+                                        <div className="h-2 w-2 rounded-full bg-primary" />
+                                        <span className="text-xs text-zinc-300">"{header}" → {field.name}</span>
+                                    </div>
+                                );
+                            })}
                         </div>
                     </div>
 
@@ -190,9 +226,58 @@ const ColumnMapper: React.FC<ColumnMapperProps> = ({ onConfirm, headers, initial
                         </div>
                     )}
 
+                    {/* Mapping Templates */}
+                    <div className="bg-zinc-900 border border-zinc-800 p-6 rounded-3xl">
+                        <h4 className="text-sm font-bold text-zinc-400 mb-4 uppercase tracking-widest flex items-center gap-2">
+                            <FolderOpen className="h-4 w-4" /> Mapping Templates
+                        </h4>
+
+                        <div className="space-y-4">
+                            <div className="flex gap-2">
+                                <input
+                                    type="text"
+                                    placeholder="New template name..."
+                                    value={templateName}
+                                    onChange={(e) => setTemplateName(e.target.value)}
+                                    className="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:ring-1 focus:ring-primary"
+                                />
+                                <button
+                                    onClick={saveTemplate}
+                                    disabled={!templateName.trim() || Object.keys(mappings).length === 0}
+                                    className="p-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-white rounded-xl transition-colors disabled:opacity-50"
+                                >
+                                    <Save className="h-4 w-4" />
+                                </button>
+                            </div>
+
+                            {Object.keys(templates).length > 0 ? (
+                                <div className="space-y-2 max-h-40 overflow-y-auto pr-2 custom-scrollbar">
+                                    {Object.keys(templates).map(name => (
+                                        <div key={name} className="flex items-center justify-between p-2 bg-zinc-950 rounded-lg group">
+                                            <button
+                                                onClick={() => loadTemplate(name)}
+                                                className="text-xs font-medium text-zinc-400 hover:text-primary transition-colors truncate text-left flex-1"
+                                            >
+                                                {name}
+                                            </button>
+                                            <button
+                                                onClick={() => deleteTemplate(name)}
+                                                className="opacity-0 group-hover:opacity-100 p-1 text-zinc-600 hover:text-red-500 transition-all"
+                                            >
+                                                <Trash2 className="h-3 w-3" />
+                                            </button>
+                                        </div>
+                                    ))}
+                                </div>
+                            ) : (
+                                <p className="text-[10px] text-zinc-600 italic">No saved templates</p>
+                            )}
+                        </div>
+                    </div>
+
                     <button
                         onClick={() => onConfirm(mappings, globalCurrency)}
-                        className="w-full bg-primary hover:bg-primary/90 text-white p-4 rounded-2xl font-bold flex items-center justify-center gap-2 transition-all shadow-xl shadow-primary/20"
+                        className="w-full bg-primary hover:bg-primary/90 text-white p-4 rounded-2xl font-bold flex items-center justify-center gap-2 transition-all shadow-xl shadow-primary/20 mt-6"
                     >
                         <Save className="h-5 w-5" /> Confirm Mapping
                     </button>

@@ -1,0 +1,9 @@
+Invoice ID,Date,Vendor,Amount,Currency,Category L1,Category L2,Category L3
+INV-001,2023-01-01,Microsoft,1500,USD,IT,Software,Subscription
+INV-002,2023-01-05,Amazon Web Services,2500,USD,IT,Infrastructure,Cloud
+INV-003,2023-01-10,Staples,450,USD,General,Supplies,Stationery
+INV-004,2023-01-15,Microsoft,1200,USD,IT,Software,Licenses
+INV-005,2023-01-20,Uber,50,USD,HR,Travel,Taxi
+INV-006,2023-01-25,Delhivery,300,USD,Logistics,Shipping,Courier
+INV-007,2022-12-01,Microsoft,1500,USD,IT,Software,Subscription
+INV-008,2023-02-05,Amazon,2500,USD,IT,Infrastructure,Hosting

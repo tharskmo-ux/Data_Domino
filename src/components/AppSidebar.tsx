@@ -1,14 +1,14 @@
 import React from 'react';
-import { ArrowLeft, Database, LayoutPanelLeft, UserCircle2, BarChart3, ChevronRight, Settings, History, Layers, ShieldCheck } from 'lucide-react';
+import { ArrowLeft, LayoutPanelLeft, UserCircle2, BarChart3, ChevronRight, Settings, History, ShieldCheck, Tag, CheckCircle2 } from 'lucide-react';
 import { cn } from '../lib/utils';
-import { motion } from 'framer-motion';
+import type { Project } from '../features/projects/ProjectContext';
 
-export type ETLStep = 'dashboard' | 'mapping' | 'data-quality' | 'matching' | 'categorization';
+export type ETLStep = 'dashboard' | 'mapping' | 'data-quality' | 'matching' | 'categorization' | 'history';
 
 interface AppSidebarProps {
     activeStep: ETLStep;
     onNavigate: (step: ETLStep) => void;
-    currentProject?: { name: string; status: string } | null;
+    currentProject?: Project | null;
     onBack?: () => void;
 }
 
@@ -31,12 +31,6 @@ const AppSidebar: React.FC<AppSidebarProps> = ({ activeStep, onNavigate, current
             description: isGlobal ? 'Global Field Dictionary' : 'Map headers to system fields'
         },
         {
-            id: 'data-quality',
-            label: 'Data Quality',
-            icon: ShieldCheck,
-            description: isGlobal ? 'Cross-project Health' : 'Health check & Metadata'
-        },
-        {
             id: 'matching',
             label: 'Supplier Matching',
             icon: UserCircle2,
@@ -45,8 +39,14 @@ const AppSidebar: React.FC<AppSidebarProps> = ({ activeStep, onNavigate, current
         {
             id: 'categorization',
             label: 'Categorization',
-            icon: Layers,
-            description: isGlobal ? 'Global Spend Taxonomy' : 'Spend taxonomy & distribution'
+            icon: Tag,
+            description: isGlobal ? 'Global Spend Taxonomy' : 'Classify & Map Categories'
+        },
+        {
+            id: 'data-quality',
+            label: 'Data Quality',
+            icon: ShieldCheck,
+            description: isGlobal ? 'Cross-project Health' : 'Health check & Metadata'
         },
     ];
 
@@ -84,6 +84,31 @@ const AppSidebar: React.FC<AppSidebarProps> = ({ activeStep, onNavigate, current
                     const isActive = activeStep === step.id;
                     const StepIcon = step.icon;
 
+                    // Determine if step is completed
+                    const isCompleted = React.useMemo(() => {
+                        if (!currentProject) return false;
+                        if (currentProject.status === 'completed') return true;
+
+                        // Check explicit activity history
+                        const hasActivity = currentProject.activities.some(a => {
+                            if (step.id === 'mapping') return a.type === 'mapping';
+                            if (step.id === 'matching') return a.type === 'matching';
+                            if (step.id === 'categorization') return a.type === 'categorization';
+                            if (step.id === 'data-quality') return a.type === 'categorization' && steps.findIndex(s => s.id === 'data-quality') < steps.findIndex(s => s.id === activeStep); // Rough proxy
+                            return false;
+                        });
+
+                        // Sequence-based inference (if we are on step 4, step 1,2,3 are done)
+                        const stepIndex = steps.findIndex(s => s.id === step.id);
+                        const currentIndex = steps.findIndex(s => s.id === activeStep);
+
+                        // Special Handling: Dashboard is the final goal
+                        if (step.id === 'dashboard') return false;
+                        if (step.id === 'data-quality') return false;
+
+                        return hasActivity || (stepIndex < currentIndex && currentIndex > 0);
+                    }, [currentProject, activeStep, step.id]);
+
                     return (
                         <button
                             key={step.id}
@@ -99,10 +124,15 @@ const AppSidebar: React.FC<AppSidebarProps> = ({ activeStep, onNavigate, current
                                 <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-8 bg-primary rounded-r-full" />
                             )}
                             <div className={cn(
-                                "p-2.5 rounded-xl transition-colors shrink-0",
+                                "p-2.5 rounded-xl transition-colors shrink-0 relative",
                                 isActive ? "bg-primary text-white" : "bg-zinc-900 text-zinc-600 group-hover:text-zinc-400"
                             )}>
                                 <StepIcon className="h-5 w-5" />
+                                {isCompleted && !isActive && (
+                                    <div className="absolute -top-1 -right-1 bg-emerald-500 rounded-full border-2 border-zinc-950 p-[1px]">
+                                        <CheckCircle2 className="h-2.5 w-2.5 text-white" />
+                                    </div>
+                                )}
                             </div>
                             <div className="text-left">
                                 <div className="font-bold text-sm">{step.label}</div>
@@ -116,8 +146,11 @@ const AppSidebar: React.FC<AppSidebarProps> = ({ activeStep, onNavigate, current
 
             <div className="p-4 border-t border-zinc-900 space-y-1 shrink-0">
                 <button
-                    onClick={() => alert('Activity History module is being initialized...')}
-                    className="w-full flex items-center gap-3 p-3 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900 rounded-xl transition-all text-sm font-medium"
+                    onClick={() => onNavigate('history')}
+                    className={cn(
+                        "w-full flex items-center gap-3 p-3 rounded-xl transition-all text-sm font-medium",
+                        activeStep === 'history' ? "bg-primary/10 text-white" : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900"
+                    )}
                 >
                     <History className="h-4 w-4" /> Activity History
                 </button>

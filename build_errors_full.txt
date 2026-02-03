@@ -1,0 +1,22 @@
+
+> data-domino@0.0.0 build
+> tsc -b && vite build
+
+src/components/AppSidebar.tsx(106,61): error TS2367: This comparison appears to be unintentional because the types '"error" | "draft" | "processing"' and '"completed"' have no overlap.
+src/features/etl/AnalyticsDashboard.tsx(11,1): error TS6133: 'useProjects' is declared but its value is never read.
+src/features/etl/AnalyticsDashboard.tsx(587,26): error TS2304: Cannot find name 'currentProject'.
+src/features/etl/AnalyticsDashboard.tsx(587,45): error TS2304: Cannot find name 'currentProject'.
+src/features/etl/AnalyticsDashboard.tsx(587,85): error TS7006: Parameter 'a' implicitly has an 'any' type.
+src/features/etl/AnalyticsDashboard.tsx(603,42): error TS2304: Cannot find name 'currentProject'.
+src/features/etl/AnalyticsDashboard.tsx(603,60): error TS2304: Cannot find name 'currentProject'.
+src/features/etl/AnalyticsDashboard.tsx(603,100): error TS7006: Parameter 'a' implicitly has an 'any' type.
+src/features/etl/AnalyticsDashboard.tsx(607,39): error TS2304: Cannot find name 'currentProject'.
+src/features/etl/AnalyticsDashboard.tsx(607,58): error TS2304: Cannot find name 'currentProject'.
+src/features/etl/AnalyticsDashboard.tsx(607,98): error TS7006: Parameter 'a' implicitly has an 'any' type.
+src/features/etl/AnalyticsDashboard.tsx(610,42): error TS2304: Cannot find name 'currentProject'.
+src/features/etl/AnalyticsDashboard.tsx(610,82): error TS7006: Parameter 'a' implicitly has an 'any' type.
+src/features/etl/AnalyticsDashboard.tsx(610,112): error TS7006: Parameter 'item' implicitly has an 'any' type.
+src/features/etl/DataProfiling.tsx(103,128): error TS2322: Type '(val: number) => string' is not assignable to type 'LabelFormatter'.
+  Types of parameters 'val' and 'label' are incompatible.
+    Type 'RenderableText' is not assignable to type 'number'.
+      Type 'undefined' is not assignable to type 'number'.
