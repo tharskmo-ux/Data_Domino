@@ -25,6 +25,7 @@ import {
 } from 'recharts';
 import { useProjects } from '../projects/ProjectContext';
 import { motion, AnimatePresence } from 'framer-motion';
+import UnlockAnalysisModal from '../subscription/UnlockAnalysisModal';
 import { cn, parseDateValue } from '../../lib/utils';
 import TransactionDrilldown from './TransactionDrilldown';
 import SourcingDrilldown from './SourcingDrilldown';
@@ -43,6 +44,7 @@ interface AnalyticsDashboardProps {
 const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings, clusters, initialTab = 'overview', currency = 'INR' }) => {
     const { currentProject, addActivity } = useProjects();
     const [isTeamModalOpen, setIsTeamModalOpen] = useState(false);
+    const [isUnlockModalOpen, setIsUnlockModalOpen] = useState(false);
     const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
     const [activeTab, _setActiveTab] = useState<'overview' | 'suppliers' | 'exports' | 'savings' | 'categorization'>(initialTab as any);
     const [dateRange, setDateRange] = useState<'ALL' | '12M' | '6M' | 'YTD'>('ALL');
@@ -687,6 +689,12 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                     </p>
                 </motion.div>
             )}
+
+            <UnlockAnalysisModal
+                isOpen={isUnlockModalOpen}
+                onClose={() => setIsUnlockModalOpen(false)}
+            />
+
             <motion.div
                 initial={{ opacity: 0, scale: 0.98 }}
                 animate={{ opacity: 1, scale: 1 }}
@@ -714,14 +722,9 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                     >
                         <Filter className="h-4 w-4" /> Filters {Object.values(filters).some(v => v) && "•"}
                     </button>
+
                     <button
-                        onClick={() => setIsTeamModalOpen(true)}
-                        className="bg-zinc-900 hover:bg-zinc-800 text-white px-5 py-3 rounded-2xl font-bold flex items-center gap-2 transition-all border border-zinc-800 active:scale-[0.98]"
-                    >
-                        <Share2 className="h-4 w-4" /> Share Report
-                    </button>
-                    <button
-                        onClick={handleExportExcel}
+                        onClick={() => setIsUnlockModalOpen(true)}
                         disabled={isGeneratingPDF}
                         className={cn(
                             "bg-white hover:bg-zinc-200 text-black px-6 py-3 rounded-2xl font-bold flex items-center gap-2 transition-all shadow-xl shadow-white/5 active:scale-[0.98]",

@@ -1,6 +1,7 @@
 import React from 'react';
 import { ArrowLeft, LayoutPanelLeft, UserCircle2, BarChart3, ChevronRight, Settings, History, ShieldCheck, Tag, CheckCircle2 } from 'lucide-react';
 import { cn } from '../lib/utils';
+import { useAuth } from '../features/auth/AuthContext';
 import type { Project } from '../features/projects/ProjectContext';
 
 export type ETLStep = 'dashboard' | 'mapping' | 'data-quality' | 'matching' | 'categorization' | 'history';
@@ -10,9 +11,11 @@ interface AppSidebarProps {
     onNavigate: (step: ETLStep) => void;
     currentProject?: Project | null;
     onBack?: () => void;
+    onOpenSettings?: () => void;
 }
 
-const AppSidebar: React.FC<AppSidebarProps> = ({ activeStep, onNavigate, currentProject, onBack }) => {
+const AppSidebar: React.FC<AppSidebarProps> = ({ activeStep, onNavigate, currentProject, onBack, onOpenSettings }) => {
+    const { role } = useAuth();
 
     // Different steps descriptions based on context
     const isGlobal = !currentProject;
@@ -154,12 +157,14 @@ const AppSidebar: React.FC<AppSidebarProps> = ({ activeStep, onNavigate, current
                 >
                     <History className="h-4 w-4" /> Activity History
                 </button>
-                <button
-                    onClick={() => alert('Project Settings will be available in the Enterprise edition.')}
-                    className="w-full flex items-center gap-3 p-3 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900 rounded-xl transition-all text-sm font-medium"
-                >
-                    <Settings className="h-4 w-4" /> Project Settings
-                </button>
+                {(role !== 'trial' || !currentProject) && (
+                    <button
+                        onClick={onOpenSettings}
+                        className="w-full flex items-center gap-3 p-3 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900 rounded-xl transition-all text-sm font-medium"
+                    >
+                        <Settings className="h-4 w-4" /> {currentProject ? 'Project Settings' : 'Settings'}
+                    </button>
+                )}
             </div>
         </aside>
     );

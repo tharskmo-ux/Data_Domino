@@ -36,6 +36,7 @@ interface ProjectContextType {
     // Session Cache for large data (prototype only)
     projectDataCache: Record<string, any>;
     updateProjectCache: (projectId: string, data: any) => void;
+    lifetimeProjectCount: number;
 }
 
 const ProjectContext = createContext<ProjectContextType | undefined>(undefined);
@@ -44,6 +45,10 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const [projects, setProjects] = useState<Project[]>([]);
     const [currentProject, setCurrentProject] = useState<Project | null>(null);
     const [projectDataCache, setProjectDataCache] = useState<Record<string, any>>({});
+    const [lifetimeProjectCount, setLifetimeProjectCount] = useState<number>(() => {
+        const saved = localStorage.getItem('dd_lifetime_count');
+        return saved ? parseInt(saved, 10) : 0;
+    });
 
     // Load from localStorage for MVP/Demo
     useEffect(() => {
@@ -77,6 +82,11 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
         };
         setProjects([newProject, ...projects]);
         setCurrentProject(newProject);
+
+        // Increment lifetime count
+        const newCount = lifetimeProjectCount + 1;
+        setLifetimeProjectCount(newCount);
+        localStorage.setItem('dd_lifetime_count', newCount.toString());
     };
 
     const updateProject = (id: string, updates: Partial<Project>) => {
@@ -111,7 +121,18 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
     };
 
     return (
-        <ProjectContext.Provider value={{ projects, createProject, updateProject, deleteProject, currentProject, setCurrentProject, addActivity, projectDataCache, updateProjectCache }}>
+        <ProjectContext.Provider value={{
+            projects,
+            createProject,
+            updateProject,
+            deleteProject,
+            currentProject,
+            setCurrentProject,
+            addActivity,
+            projectDataCache,
+            updateProjectCache,
+            lifetimeProjectCount
+        }}>
             {children}
         </ProjectContext.Provider>
     );

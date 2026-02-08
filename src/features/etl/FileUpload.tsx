@@ -19,6 +19,7 @@ export interface FileMetadata {
 interface FileUploadProps {
     onUploadComplete: (data: any[], metadata: FileMetadata) => void;
     maxSizeMB?: number;
+    disabled?: boolean;
 }
 
 interface UploadingFile {
@@ -29,10 +30,11 @@ interface UploadingFile {
     error?: string;
 }
 
-const FileUpload: React.FC<FileUploadProps> = ({ onUploadComplete, maxSizeMB = 100 }) => {
+const FileUpload: React.FC<FileUploadProps> = ({ onUploadComplete, maxSizeMB = 100, disabled = false }) => {
     const [uploadingFiles, setUploadingFiles] = useState<UploadingFile[]>([]);
 
     const onDrop = useCallback((acceptedFiles: File[]) => {
+        if (disabled) return;
         const newFiles = acceptedFiles.map(file => ({
             id: Math.random().toString(36).substr(2, 9),
             file,
@@ -46,7 +48,7 @@ const FileUpload: React.FC<FileUploadProps> = ({ onUploadComplete, maxSizeMB = 1
         newFiles.forEach(fileObj => {
             processFile(fileObj);
         });
-    }, []);
+    }, [disabled]);
 
     const processFile = (fileObj: UploadingFile) => {
         const reader = new FileReader();
@@ -122,6 +124,7 @@ const FileUpload: React.FC<FileUploadProps> = ({ onUploadComplete, maxSizeMB = 1
     const { getRootProps, getInputProps, isDragActive } = useDropzone({
         onDrop,
         maxSize: maxSizeMB * 1024 * 1024,
+        disabled,
         accept: {
             'text/csv': ['.csv'],
             'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
@@ -134,21 +137,32 @@ const FileUpload: React.FC<FileUploadProps> = ({ onUploadComplete, maxSizeMB = 1
             <div
                 {...getRootProps()}
                 className={cn(
-                    "relative border-2 border-dashed rounded-3xl p-12 transition-all cursor-pointer group flex flex-col items-center justify-center text-center",
-                    isDragActive
-                        ? "border-primary bg-primary/5 scale-[0.99]"
-                        : "border-zinc-800 bg-zinc-900/50 hover:border-zinc-700 hover:bg-zinc-900"
+                    "relative border-2 border-dashed rounded-3xl p-12 transition-all group flex flex-col items-center justify-center text-center",
+                    disabled
+                        ? "border-zinc-900 bg-zinc-900/20 cursor-not-allowed"
+                        : isDragActive
+                            ? "border-primary bg-primary/5 scale-[0.99] cursor-pointer"
+                            : "border-zinc-800 bg-zinc-900/50 hover:border-zinc-700 hover:bg-zinc-900 cursor-pointer"
                 )}
             >
                 <input {...getInputProps()} />
 
-                <div className="w-20 h-20 bg-zinc-800 rounded-2xl flex items-center justify-center mb-6 text-zinc-500 group-hover:text-primary group-hover:bg-primary/10 transition-all">
+                <div className={cn(
+                    "w-20 h-20 rounded-2xl flex items-center justify-center mb-6 transition-all",
+                    disabled
+                        ? "bg-zinc-900 text-zinc-700"
+                        : "bg-zinc-800 text-zinc-500 group-hover:text-primary group-hover:bg-primary/10"
+                )}>
                     <Upload className="h-10 w-10" />
                 </div>
 
-                <h3 className="text-2xl font-bold mb-2">Click or drag data here</h3>
+                <h3 className={cn("text-2xl font-bold mb-2", disabled ? "text-zinc-600" : "text-white")}>
+                    {disabled ? 'Upload Limit Reached' : 'Click or drag data here'}
+                </h3>
                 <p className="text-zinc-500 max-w-sm">
-                    Support CSV and Excel files up to <span className="text-zinc-300 font-bold">{maxSizeMB}MB</span>.
+                    {disabled
+                        ? 'Trial users can only upload one file per project.'
+                        : `Support CSV and Excel files up to ${maxSizeMB}MB.`}
                 </p>
 
                 {isDragActive && (

@@ -2,8 +2,10 @@ import { useAuth } from '../auth/AuthContext';
 import { auth } from '../../lib/firebase';
 import { signOut } from 'firebase/auth';
 import { LogOut, Plus, FolderOpen, TrendingUp, ShieldCheck, Clock, Trash2, ArrowRight, Users, Target } from 'lucide-react';
+import { cn } from '../../lib/utils';
 import { useState, useEffect } from 'react';
 import CreateProjectModal from './CreateProjectModal';
+import GlobalSettingsModal from '../settings/GlobalSettingsModal';
 import ProjectView from './ProjectView';
 import { useProjects } from './ProjectContext';
 import AppSidebar, { type ETLStep } from '../../components/AppSidebar';
@@ -11,9 +13,10 @@ import { motion } from 'framer-motion';
 import ActivityHistory from '../etl/ActivityHistory';
 
 const DashboardPage = () => {
-    const { user, isDemo } = useAuth();
+    const { user, isDemo, role } = useAuth();
     const { projects, createProject, deleteProject, currentProject, setCurrentProject } = useProjects();
     const [isModalOpen, setIsModalOpen] = useState(false);
+    const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [activeGlobalView, setActiveGlobalView] = useState<ETLStep>('dashboard');
 
     useEffect(() => {
@@ -136,6 +139,12 @@ const DashboardPage = () => {
                 <AppSidebar
                     activeStep={activeGlobalView}
                     onNavigate={setActiveGlobalView}
+                    onOpenSettings={() => setIsSettingsOpen(true)}
+                />
+
+                <GlobalSettingsModal
+                    isOpen={isSettingsOpen}
+                    onClose={() => setIsSettingsOpen(false)}
                 />
 
                 <main className="flex-1 overflow-y-auto pl-80 relative z-10">
@@ -151,12 +160,21 @@ const DashboardPage = () => {
                                     </div>
                                     <button
                                         onClick={() => setIsModalOpen(true)}
-                                        className="group bg-primary hover:bg-primary/90 text-white px-6 py-2.5 rounded-xl font-bold flex items-center gap-2 transition-all shadow-lg shadow-primary/20 hover:shadow-primary/30"
+                                        disabled={role === 'trial' && projects.length >= 1}
+                                        className={cn(
+                                            "group px-6 py-2.5 rounded-xl font-bold flex items-center gap-2 transition-all shadow-lg",
+                                            role === 'trial' && projects.length >= 1
+                                                ? "bg-zinc-800 text-zinc-500 cursor-not-allowed border border-zinc-700 shadow-none"
+                                                : "bg-primary hover:bg-primary/90 text-white shadow-primary/20 hover:shadow-primary/30"
+                                        )}
                                     >
-                                        <div className="p-1 bg-white/20 rounded-lg group-hover:scale-110 transition-transform">
+                                        <div className={cn(
+                                            "p-1 rounded-lg transition-transform",
+                                            role === 'trial' && projects.length >= 1 ? "bg-zinc-700" : "bg-white/20 group-hover:scale-110"
+                                        )}>
                                             <Plus className="h-4 w-4" />
                                         </div>
-                                        Create New Project
+                                        {role === 'trial' && projects.length >= 1 ? 'Project Limit Reached' : 'Create New Project'}
                                     </button>
                                 </div>
 
@@ -218,15 +236,17 @@ const DashboardPage = () => {
                                                                 }`}>
                                                                 {project.status || 'Active'}
                                                             </div>
-                                                            <button
-                                                                onClick={(e) => {
-                                                                    e.stopPropagation();
-                                                                    deleteProject(project.id);
-                                                                }}
-                                                                className="p-2 text-zinc-600 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-colors"
-                                                            >
-                                                                <Trash2 className="h-4 w-4" />
-                                                            </button>
+                                                            {role !== 'trial' && (
+                                                                <button
+                                                                    onClick={(e) => {
+                                                                        e.stopPropagation();
+                                                                        deleteProject(project.id);
+                                                                    }}
+                                                                    className="p-2 text-zinc-600 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-colors"
+                                                                >
+                                                                    <Trash2 className="h-4 w-4" />
+                                                                </button>
+                                                            )}
                                                         </div>
                                                     </div>
 

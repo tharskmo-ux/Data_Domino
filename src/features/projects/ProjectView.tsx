@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Database, ChevronRight, FileCheck2 } from 'lucide-react';
 import { useProjects } from './ProjectContext';
+import ProjectSettingsModal from './ProjectSettingsModal'; // Import Modal
 import FileUpload from '../etl/FileUpload';
 import type { FileMetadata } from '../etl/FileUpload';
 import ColumnMapper from '../etl/ColumnMapper';
@@ -13,7 +14,8 @@ import AppSidebar, { type ETLStep } from '../../components/AppSidebar';
 import DataProfiling from '../etl/DataProfiling';
 import ActivityHistory from '../etl/ActivityHistory';
 import { useSubscription } from '../subscription/SubscriptionContext';
-import { Lock, FileDown } from 'lucide-react';
+import { Lock, FileDown, AlertCircle } from 'lucide-react';
+import { useAuth } from '../auth/AuthContext';
 
 const ExportButton = () => {
     const { checkAccess } = useSubscription();
@@ -37,9 +39,14 @@ const ExportButton = () => {
 };
 
 const ProjectView: React.FC = () => {
-    const { currentProject, setCurrentProject, updateProject, addActivity, updateProjectCache, projectDataCache } = useProjects();
+    const { role } = useAuth();
+    const { currentProject, setCurrentProject, updateProject, deleteProject, addActivity, updateProjectCache, projectDataCache } = useProjects();
     const [activeStep, setActiveStep] = useState<ETLStep>('dashboard');
+
+    const hasAlreadyUploaded = currentProject?.activities.some(a => a.type === 'upload');
+    const isUploadDisabled = role === 'trial' && hasAlreadyUploaded;
     const [isProcessing, setIsProcessing] = useState(false);
+    const [isSettingsOpen, setIsSettingsOpen] = useState(false); // Modal State
 
     // Core ETL Data State
     const [projectData, setProjectData] = useState<{
@@ -365,6 +372,18 @@ const ProjectView: React.FC = () => {
                 onNavigate={setActiveStep}
                 currentProject={currentProject}
                 onBack={() => setCurrentProject(null)}
+                onOpenSettings={() => setIsSettingsOpen(true)}
+            />
+
+            <ProjectSettingsModal
+                isOpen={isSettingsOpen}
+                onClose={() => setIsSettingsOpen(false)}
+                project={currentProject}
+                onUpdate={(id, data) => updateProject(id, data)}
+                onDelete={(id) => {
+                    deleteProject(id);
+                    setCurrentProject(null);
+                }}
             />
 
             {/* Main Workspace Area */}
@@ -422,7 +441,19 @@ const ProjectView: React.FC = () => {
                                                 Select your procurement data files. We support massive datasets (up to 100MB) from SAP, Tally, and custom ERP exports.
                                             </p>
                                         </div>
-                                        <FileUpload onUploadComplete={handleUploadComplete} />
+                                        <FileUpload
+                                            onUploadComplete={handleUploadComplete}
+                                            disabled={isUploadDisabled}
+                                        />
+                                        {isUploadDisabled && (
+                                            <div className="mt-4 p-4 bg-amber-500/10 border border-amber-500/20 rounded-2xl flex items-center gap-3">
+                                                <AlertCircle className="h-5 w-5 text-amber-500" />
+                                                <p className="text-sm text-amber-500 font-medium">
+                                                    Trial Limit: You can only upload one file per project.
+                                                    <button className="ml-2 underline font-bold hover:text-amber-400">Upgrade to Enterprise</button>
+                                                </p>
+                                            </div>
+                                        )}
                                     </div>
                                 ) : (
                                     <AnalyticsDashboard

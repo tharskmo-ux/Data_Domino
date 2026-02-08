@@ -35,7 +35,11 @@ const SignupPage = () => {
             navigate('/');
         } catch (err: any) {
             console.error(err);
-            setError(err.message || 'Failed to create account. Please try again.');
+            if (err.code === 'auth/email-already-in-use') {
+                setError('User already Exist');
+            } else {
+                setError(err.message || 'Failed to create account. Please try again.');
+            }
         } finally {
             setLoading(false);
         }

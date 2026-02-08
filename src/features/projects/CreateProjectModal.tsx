@@ -20,6 +20,7 @@ const CreateProjectModal: React.FC<CreateProjectModalProps> = ({ isOpen, onClose
 
     // Feature Gating
     const { checkAccess } = useSubscription();
+    // Reverted to active project count as per user request
     const { projects } = useProjects();
     const canCreateProject = checkAccess('unlimited_projects') || projects.length < 1;
 
