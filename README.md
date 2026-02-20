@@ -71,3 +71,8 @@ export default defineConfig([
   },
 ])
 ```
+## Contact & Support
+
+- **Contact:** hello@enalsys.com
+- **Book a demo:** https://cal.id/hello-enalsys
+- **Support:** Need help? Email hello@enalsys.com or book a call at https://cal.id/hello-enalsys

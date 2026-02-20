@@ -3,6 +3,8 @@ import { X, User, ShieldCheck, LogOut, Building2, Bell } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';
 import { auth } from '../../lib/firebase';
 import { signOut } from 'firebase/auth';
+import { HARSHAD_ADMIN_EMAIL } from '../../lib/constants';
+import { useSubscription } from '../subscription/SubscriptionContext';
 
 interface GlobalSettingsModalProps {
     isOpen: boolean;
@@ -11,6 +13,7 @@ interface GlobalSettingsModalProps {
 
 const GlobalSettingsModal: React.FC<GlobalSettingsModalProps> = ({ isOpen, onClose }) => {
     const { user, isDemo } = useAuth();
+    const { organization } = useSubscription();
     const [activeTab, setActiveTab] = useState<'profile' | 'notifications'>('profile');
 
     if (!isOpen) return null;
@@ -82,7 +85,7 @@ const GlobalSettingsModal: React.FC<GlobalSettingsModalProps> = ({ isOpen, onClo
                             </div>
 
                             {/* Admin Section */}
-                            {(user?.email === 'harshad.am@enalsys.com' || isDemo) && (
+                            {(user?.email === HARSHAD_ADMIN_EMAIL || isDemo) && (
                                 <div className="p-6 bg-amber-500/10 border border-amber-500/20 rounded-2xl space-y-4">
                                     <div className="flex items-center gap-3 text-amber-500">
                                         <ShieldCheck className="h-6 w-6" />
@@ -104,8 +107,10 @@ const GlobalSettingsModal: React.FC<GlobalSettingsModalProps> = ({ isOpen, onClo
                                 <label className="text-sm font-medium text-zinc-400">Organization</label>
                                 <div className="flex items-center gap-3 p-3 bg-zinc-950 border border-zinc-800 rounded-xl text-zinc-300">
                                     <Building2 className="h-4 w-4 text-zinc-500" />
-                                    <span>{isDemo ? 'Demo Organization' : 'Enalsys Default'}</span>
-                                    <span className="ml-auto text-xs font-bold px-2 py-0.5 bg-zinc-800 rounded text-zinc-500">FREE TIER</span>
+                                    <span>{organization?.companyName || organization?.adminEmail?.split('@')[1] || 'Workspace'}</span>
+                                    <span className="ml-auto text-xs font-bold px-2 py-0.5 bg-zinc-800 rounded text-zinc-500 uppercase">
+                                        {organization?.subscription.type || 'FREE'} TIER
+                                    </span>
                                 </div>
                             </div>
                         </div>

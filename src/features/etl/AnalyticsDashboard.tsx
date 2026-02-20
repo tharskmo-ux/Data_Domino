@@ -15,7 +15,8 @@ import {
     Zap,
     AlertCircle,
     Lock,
-    Calendar
+    Calendar,
+    Mail
 } from 'lucide-react';
 import { ExcelGenerator } from '../../utils/ExcelGenerator';
 import TeamManagement from './TeamManagement';
@@ -30,6 +31,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import UnlockAnalysisModal from '../subscription/UnlockAnalysisModal';
 import { useAuth } from '../auth/AuthContext';
 import { cn, parseDateValue } from '../../lib/utils';
+import { ENALSYS_BOOKING_URL } from '../../lib/constants';
 import TransactionDrilldown from './TransactionDrilldown';
 import SourcingDrilldown from './SourcingDrilldown';
 import SupplierSummaryDrilldown from './SupplierSummaryDrilldown';
@@ -825,12 +827,6 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
         }).format(val);
     };
 
-    const smartTickFormatter = (val: number) => {
-        if (val >= 10000000) return `₹${(val / 10000000).toFixed(1)} Cr`;
-        if (val >= 100000) return `₹${(val / 100000).toFixed(1)} L`;
-        return `₹${val} `;
-    };
-
     const formatValue = (val: any, type: string) => {
         if (type === 'currency') return formatCurrency(val);
         if (type === 'percent') return `${typeof val === 'number' ? val.toFixed(1) : val}%`;
@@ -954,6 +950,15 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                         )}
                         {canExport ? "Export Analysis (Excel)" : "Unlock Export (Enterprise)"}
                     </button>
+
+                    <button
+                        onClick={() => setIsTeamModalOpen(true)}
+                        className="px-5 py-3 rounded-2xl font-bold flex items-center gap-2 transition-all border active:scale-[0.98] bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white hover:bg-zinc-800"
+                        title="Share Tool / Invite Collaborators"
+                    >
+                        <Mail className="h-4 w-4" /> Share
+                    </button>
+
                     <div className="relative" ref={historyRef}>
                         <button
                             onClick={() => setIsHistoryOpen(!isHistoryOpen)}
@@ -1082,24 +1087,29 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                                 <span className="text-[10px] font-black uppercase tracking-[0.2em] text-teal-500/80">Intelligence Engine Activated</span>
                                             </div>
                                             <span className="bg-amber-500/10 text-amber-500 text-[10px] font-black px-3 py-1 rounded-full border border-amber-500/20 uppercase tracking-widest">
-                                                Restricted Access
+                                                {checkAccess('savings_roi') ? 'Full Access' : 'Restricted Access'}
                                             </span>
                                         </div>
 
                                         <h2 className="text-xl font-bold text-zinc-400 mb-2">Total Potential Savings Identified</h2>
                                         <div className="flex items-baseline gap-4 mb-4 relative group/savings">
                                             <div className="relative">
-                                                <h1 className="text-7xl font-black text-white tracking-tighter text-glow-primary blur-xl select-none transition-all duration-700 group-hover/savings:blur-md">
+                                                <h1 className={cn(
+                                                    "text-7xl font-black text-white tracking-tighter text-glow-primary select-none transition-all duration-700",
+                                                    !checkAccess('savings_roi') && "blur-xl group-hover/savings:blur-md"
+                                                )}>
                                                     {formatCurrency(dynamicStats.identifiedSavings, false)}
                                                 </h1>
-                                                <div className="absolute inset-0 flex items-center justify-center">
-                                                    <div className="flex flex-col items-center gap-1">
-                                                        <div className="p-2 rounded-full bg-primary/20 border border-primary/30 text-primary">
-                                                            <ShieldCheck className="w-6 h-6" />
+                                                {!checkAccess('savings_roi') && (
+                                                    <div className="absolute inset-0 flex items-center justify-center">
+                                                        <div className="flex flex-col items-center gap-1">
+                                                            <div className="p-2 rounded-full bg-primary/20 border border-primary/30 text-primary">
+                                                                <ShieldCheck className="w-6 h-6" />
+                                                            </div>
+                                                            <span className="text-[10px] font-black uppercase tracking-widest text-primary/80">Analysis Gated</span>
                                                         </div>
-                                                        <span className="text-[10px] font-black uppercase tracking-widest text-primary/80">Analysis Gated</span>
                                                     </div>
-                                                </div>
+                                                )}
                                             </div>
                                         </div>
                                         <p className="text-zinc-500 text-sm max-w-lg leading-relaxed mb-8 font-medium">
@@ -1109,11 +1119,11 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
 
                                     <div className="relative z-10 flex flex-wrap gap-4 mt-auto">
                                         <button
-                                            onClick={() => openUpgradeModal("Unlock Expert Analysis", "Unlock this analysis by scheduling a 15-min expert walkthrough. Our team will decrypt these savings for you.")}
+                                            onClick={() => checkAccess('savings_roi') ? _setActiveTab('savings') : openUpgradeModal("Unlock Expert Analysis", "Unlock this analysis by scheduling a 15-min expert walkthrough. Our team will decrypt these savings for you.")}
                                             className="bg-primary hover:bg-teal-600 text-white px-8 py-4 rounded-2xl font-black text-xs uppercase tracking-widest transition-all shadow-xl shadow-primary/20 border border-primary/50 relative overflow-hidden group/btn active:scale-95"
                                         >
                                             <span className="relative z-10 flex items-center gap-2">
-                                                Unlock Analysis with Experts
+                                                {checkAccess('savings_roi') ? 'View Savings Roadmap' : 'Unlock Analysis with Experts'}
                                                 <ChevronRight className="w-4 h-4 group-hover/btn:translate-x-1 transition-transform" />
                                             </span>
                                             <div className="absolute inset-0 bg-white/20 translate-y-full group-hover/btn:translate-y-0 transition-transform duration-300" />
@@ -1122,17 +1132,25 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                 </div>
 
                                 <div className="bg-zinc-900/40 border border-zinc-800 rounded-[2.5rem] p-8 flex flex-col justify-center relative overflow-hidden group">
-                                    <div className="absolute inset-0 bg-zinc-950/40 backdrop-blur-[2px] z-20 group-hover:backdrop-blur-0 transition-all duration-700" />
-                                    <div className="relative z-30 text-center py-6">
-                                        <div className="w-12 h-12 rounded-2xl bg-zinc-800 border border-zinc-700 mx-auto mb-4 flex items-center justify-center text-zinc-500">
-                                            <MoreHorizontal className="w-6 h-6" />
+                                    <div className={cn(
+                                        "absolute inset-0 bg-zinc-950/40 backdrop-blur-[2px] z-20 transition-all duration-700",
+                                        checkAccess('savings_roi') ? "group-hover:backdrop-blur-0" : "backdrop-blur-sm"
+                                    )} />
+                                    {!checkAccess('savings_roi') && (
+                                        <div className="relative z-30 text-center py-6">
+                                            <div className="w-12 h-12 rounded-2xl bg-zinc-800 border border-zinc-700 mx-auto mb-4 flex items-center justify-center text-zinc-500">
+                                                <MoreHorizontal className="w-6 h-6" />
+                                            </div>
+                                            <h3 className="text-white font-bold text-sm mb-1 uppercase tracking-widest">Levers Gated</h3>
+                                            <p className="text-[10px] text-zinc-500 font-bold px-4 leading-relaxed uppercase tracking-tighter">
+                                                Savings Breakdown requires <br /> strategic calibration
+                                            </p>
                                         </div>
-                                        <h3 className="text-white font-bold text-sm mb-1 uppercase tracking-widest">Levers Gated</h3>
-                                        <p className="text-[10px] text-zinc-500 font-bold px-4 leading-relaxed uppercase tracking-tighter">
-                                            Savings Breakdown requires <br /> strategic calibration
-                                        </p>
-                                    </div>
-                                    <div className="relative z-10 blur-[1px] opacity-40 group-hover:blur-none group-hover:opacity-100 transition-all duration-500 pointer-events-none select-none">
+                                    )}
+                                    <div className={cn(
+                                        "relative z-10 transition-all duration-500 pointer-events-none select-none",
+                                        !checkAccess('savings_roi') ? "blur-[1px] opacity-40 group-hover:blur-none group-hover:opacity-100" : "opacity-100"
+                                    )}>
                                         <div className="space-y-4">
                                             {dynamicStats.savingsLevers.map((lever) => (
                                                 <div key={lever.name} className="flex flex-col gap-1.5">
@@ -1543,7 +1561,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                 </div>
 
                                 <div className="grid grid-cols-1 md:grid-cols-3 gap-6 relative group/grid">
-                                    {(!isAdmin) && (
+                                    {!checkAccess('savings_roi') && (
                                         <div className="absolute inset-0 z-10 flex flex-col items-center justify-center pointer-events-none gap-6">
                                             <div className="bg-black/90 backdrop-blur-md px-8 py-4 rounded-2xl border border-primary/30 flex items-center gap-3 shadow-2xl">
                                                 <Lock className="w-5 h-5 text-primary" />
@@ -1552,20 +1570,20 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                             <div className="flex flex-col items-center gap-2 pointer-events-auto">
                                                 <p className="text-zinc-400 text-[10px] font-bold uppercase tracking-widest">Unlock your complete savings roadmap — speak with an Enalsys expert.</p>
                                                 <a
-                                                    href="https://cal.id/hello-enalsys"
+                                                    href={ENALSYS_BOOKING_URL}
                                                     target="_blank"
                                                     rel="noopener noreferrer"
                                                     className="bg-primary hover:bg-teal-600 text-white px-8 py-4 rounded-2xl font-black text-xs uppercase tracking-widest shadow-2xl transition-all active:scale-95 flex items-center gap-2"
                                                 >
                                                     <Calendar className="w-4 h-4" />
-                                                    Book a Call with Enalsys
+                                                    Book a call with Enalsys
                                                 </a>
                                             </div>
                                         </div>
                                     )}
                                     <div className={cn(
                                         "bg-primary/5 border border-primary/20 rounded-3xl p-8 border-b-4 border-b-primary transition-all",
-                                        !isAdmin && "blur-xl pointer-events-none select-none opacity-50"
+                                        !checkAccess('savings_roi') && "blur-xl pointer-events-none select-none opacity-50"
                                     )}>
                                         <span className="text-[10px] font-black text-primary uppercase tracking-widest mb-4 block">Total Potential ROI</span>
                                         <div className="text-4xl font-black text-white mb-2">{formatCurrency(dynamicStats.identifiedSavings)}</div>
@@ -1573,7 +1591,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                     </div>
                                     <div className={cn(
                                         "bg-emerald-500/5 border border-emerald-500/20 rounded-3xl p-8 border-b-4 border-b-emerald-500 transition-all",
-                                        !isAdmin && "blur-xl pointer-events-none select-none opacity-50"
+                                        !checkAccess('savings_roi') && "blur-xl pointer-events-none select-none opacity-50"
                                     )}>
                                         <span className="text-[10px] font-black text-emerald-500 uppercase tracking-widest mb-4 block">Quick-Win Savings</span>
                                         <div className="text-4xl font-black text-white mb-2">{formatCurrency(dynamicStats.identifiedSavings * 0.3)}</div>
@@ -1581,7 +1599,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                     </div>
                                     <div className={cn(
                                         "bg-amber-500/5 border border-amber-500/20 rounded-3xl p-8 border-b-4 border-b-amber-500 transition-all",
-                                        !isAdmin && "blur-xl pointer-events-none select-none opacity-50"
+                                        !checkAccess('savings_roi') && "blur-xl pointer-events-none select-none opacity-50"
                                     )}>
                                         <span className="text-[10px] font-black text-amber-500 uppercase tracking-widest mb-4 block">Strategic Pipeline</span>
                                         <div className="text-4xl font-black text-white mb-2">{formatCurrency(dynamicStats.identifiedSavings * 0.7)}</div>
@@ -1683,7 +1701,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                                 To prevent market signaling and protect your negotiation leverage, detailed category benchmarks and execution roadmaps are restricted to verified strategic partners.
                                             </p>
                                             <button
-                                                onClick={() => alert('Requesting access to your personalized ROI roadmap...')}
+                                                onClick={() => window.open(ENALSYS_BOOKING_URL, '_blank')}
                                                 className="bg-white text-black px-8 py-4 rounded-2xl font-black text-xs uppercase tracking-widest shadow-2xl hover:bg-zinc-200 transition-all active:scale-95"
                                             >
                                                 Unlock Strategy Roadmap

@@ -1,0 +1,39 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isAdmin() {
+      return request.auth != null &&
+        exists(/databases/$(database)/documents/user_roles/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/user_roles/$(request.auth.uid)).data.role == 'admin';
+    }
+
+    match /user_roles/{userId} {
+      allow read: if request.auth != null && (request.auth.uid == userId || isAdmin());
+
+      allow create: if (request.auth != null && request.auth.uid == userId && request.resource.data.role == 'trial')
+        || isAdmin();
+
+      allow update: if isAdmin() ||
+        (request.auth != null && request.auth.uid == userId &&
+         request.resource.data.role == resource.data.role &&
+         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['planSelected']));
+
+      allow delete: if isAdmin();
+    }
+
+    match /organizations/{orgId} {
+      allow read: if request.auth != null && (request.auth.uid == orgId || isAdmin());
+      allow write: if request.auth != null && (request.auth.uid == orgId || isAdmin());
+    }
+
+    match /projects/{projectId} {
+      allow read, write: if request.auth != null && (
+        resource.data.userId == request.auth.uid ||
+        request.resource.data.userId == request.auth.uid ||
+        isAdmin()
+      );
+    }
+
+  }
+}

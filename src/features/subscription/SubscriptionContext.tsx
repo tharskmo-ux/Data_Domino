@@ -1,15 +1,18 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
 import { db, IS_DEMO_MODE } from '../../lib/firebase';
-import { doc, getDoc, setDoc, Timestamp } from 'firebase/firestore';
+import { doc, getDoc, setDoc, updateDoc, Timestamp } from 'firebase/firestore';
 import type { Organization, Subscription } from '../../types/organization';
+import { ENALSYS_BOOKING_URL } from '../../lib/constants';
 
 interface SubscriptionContextType {
     organization: Organization | null;
     subscription: Subscription | null;
     loading: boolean;
     checkAccess: (feature: 'advanced_export' | 'unlimited_projects' | 'team_management') => boolean;
+    updateCompanyName: (name: string) => Promise<void>;
     upgradeToEnterprise: () => Promise<void>; // For demo/admin purposes
+    isSuspended: boolean;
 }
 
 const SubscriptionContext = createContext<SubscriptionContextType | undefined>(undefined);
@@ -21,9 +24,10 @@ export const useSubscription = () => {
 };
 
 export const SubscriptionProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-    const { user, loading: authLoading } = useAuth();
+    const { user, loading: authLoading, isAdmin, isEnterprise } = useAuth();
     const [organization, setOrganization] = useState<Organization | null>(null);
     const [loading, setLoading] = useState(true);
+
 
     useEffect(() => {
         if (authLoading) return;
@@ -38,8 +42,12 @@ export const SubscriptionProvider: React.FC<{ children: React.ReactNode }> = ({ 
                 // Mock data for Demo Mode
                 setOrganization({
                     id: 'demo-org',
-                    name: 'Demo Corp',
-                    ownerId: user.uid,
+                    name: user.displayName || user.email?.split('@')[0] || 'Demo Workspace',
+                    companyName: 'Demo Corp',
+                    userName: user.email ? user.email.split('@')[0] : 'demo',
+                    displayName: user.displayName || 'Demo User',
+                    adminId: user.uid,
+                    adminEmail: user.email || 'demo@example.com',
                     createdAt: Timestamp.now(),
                     members: [user.uid],
                     subscription: {
@@ -54,12 +62,6 @@ export const SubscriptionProvider: React.FC<{ children: React.ReactNode }> = ({ 
 
             try {
                 // For simplified MVP, we assume User ID maps to an Org or we fetch it.
-                // In a real app, User profile would have `orgId`.
-                // Here, let's assume we store organization under `organizations/{user.uid}` 
-                // for single-tenant-like structure initially, or query by member.
-                // Let's stick to a simple: User creates Org -> Org ID stored in local state/profile.
-
-                // CHECK if user is already part of an org (simplification: ID = UID for first org)
                 const orgRef = doc(db, 'organizations', user.uid);
                 const orgSnap = await getDoc(orgRef);
 
@@ -67,11 +69,17 @@ export const SubscriptionProvider: React.FC<{ children: React.ReactNode }> = ({ 
                     setOrganization(orgSnap.data() as Organization);
                 } else {
                     // Auto-create Free Org for new user
+                    const userName = user.email ? user.email.split('@')[0] : 'user';
+
                     const newOrg: Organization = {
                         id: user.uid,
-                        name: `${user.displayName || 'User'}'s Workspace`,
-                        ownerId: user.uid,
-                        ownerEmail: user.email || '',
+                        // Step 2: User's displayName if available, falling back to email prefix
+                        name: user.displayName || user.email?.split('@')[0] || 'Workspace',
+                        companyName: "", // Default to empty string
+                        userName,
+                        displayName: user.displayName || null,
+                        adminId: user.uid,
+                        adminEmail: user.email || '',
                         createdAt: Timestamp.now(),
                         members: [user.uid],
                         subscription: {
@@ -93,27 +101,40 @@ export const SubscriptionProvider: React.FC<{ children: React.ReactNode }> = ({ 
         fetchOrg();
     }, [user, authLoading]);
 
-    const checkAccess = (feature: 'advanced_export' | 'unlimited_projects' | 'team_management') => {
+    const checkAccess = (feature: 'advanced_export' | 'unlimited_projects' | 'team_management' | 'savings_roi') => {
+        if (isAdmin || isEnterprise) return true;
         if (!organization) return false;
-        const subType = organization.subscription.type;
 
-        if (subType === 'ENTERPRISE') return true;
-
-        // Free Tier Limits
+        // Trial/Free Tier Limits
         switch (feature) {
             case 'advanced_export': return false;
-            case 'team_management': return false; // Single user only
-            case 'unlimited_projects': return false; // Limit to 1
+            case 'team_management': return false;
+            case 'unlimited_projects': return false;
+            case 'savings_roi': return false;
             default: return true;
         }
     };
 
-    const upgradeToEnterprise = async () => {
-        if (!organization) return;
-        // This is a client-side helper, but in reality this should be done via Admin Dashboard
-        // We include it here if we want to build a "Self-Upgrade" button for testing
-        console.log("Upgrading to Enterprise (Implementation Pending Admin Action)");
+    const updateCompanyName = async (name: string) => {
+        if (!user || !organization) return;
+
+        try {
+            const orgRef = doc(db, 'organizations', user.uid);
+            await updateDoc(orgRef, { companyName: name, name: name });
+
+            // Update local state
+            setOrganization(prev => prev ? { ...prev, companyName: name, name: name } : null);
+        } catch (err) {
+            console.error("Failed to update company name", err);
+            throw err;
+        }
     };
+
+    const upgradeToEnterprise = async () => {
+        window.open(ENALSYS_BOOKING_URL, '_blank');
+    };
+
+    const isSuspended = organization?.subscription.status !== 'ACTIVE' && !IS_DEMO_MODE;
 
     return (
         <SubscriptionContext.Provider value={{
@@ -121,7 +142,9 @@ export const SubscriptionProvider: React.FC<{ children: React.ReactNode }> = ({ 
             subscription: organization?.subscription || null,
             loading,
             checkAccess,
-            upgradeToEnterprise
+            updateCompanyName,
+            upgradeToEnterprise,
+            isSuspended
         }}>
             {children}
         </SubscriptionContext.Provider>

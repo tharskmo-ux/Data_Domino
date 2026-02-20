@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { signInWithEmailAndPassword } from 'firebase/auth';
 import { auth } from '../../lib/firebase';
+import { HARSHAD_ADMIN_EMAIL } from '../../lib/constants';
 import AuthLayout from './AuthLayout';
 import { Mail, Lock, ArrowRight, Loader2 } from 'lucide-react';
 import { useAuth } from './AuthContext';
@@ -23,7 +24,7 @@ const LoginPage = () => {
             // Mock login delay
             setTimeout(() => {
                 // UPDATE DEMO ROLE BASED ON EMAIL INPUT
-                const role = email === 'harshad.am@enalsys.com' ? 'admin' : 'user';
+                const role = email === HARSHAD_ADMIN_EMAIL ? 'admin' : 'user';
                 localStorage.setItem('demo_role', role);
 
                 // Force reload to pick up new AuthContext state

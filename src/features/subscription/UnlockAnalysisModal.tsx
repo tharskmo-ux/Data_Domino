@@ -1,6 +1,7 @@
 import React from 'react';
-import { X, Crown, Loader2 } from 'lucide-react';
+import { X, Crown } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { ENALSYS_BOOKING_URL } from '../../lib/constants';
 
 interface UnlockAnalysisModalProps {
     isOpen: boolean;
@@ -50,12 +51,12 @@ const UnlockAnalysisModal: React.FC<UnlockAnalysisModalProps> = ({ isOpen, onClo
                             </p>
 
                             <a
-                                href="https://www.enalsys.com/contact"
+                                href={ENALSYS_BOOKING_URL}
                                 target="_blank"
                                 rel="noopener noreferrer"
                                 className="w-full block text-center py-4 bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 text-white font-bold rounded-2xl shadow-lg shadow-amber-900/20 transition-all hover:scale-[1.02] active:scale-[0.98]"
                             >
-                                Upgrade to Enterprise
+                                Book a Call to Unlock
                             </a>
                         </div>
                     </motion.div>

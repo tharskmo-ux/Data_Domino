@@ -1,6 +1,7 @@
 import React from 'react';
-import { X, Crown, CheckCircle2 } from 'lucide-react';
+import { X, Crown } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { ENALSYS_BOOKING_URL, ENALSYS_EMAIL } from '../../lib/constants';
 
 interface UpgradeModalProps {
     isOpen: boolean;
@@ -51,17 +52,24 @@ const UpgradeModal: React.FC<UpgradeModalProps> = ({
 
                         <h2 className="text-2xl font-bold text-white mb-2">{title}</h2>
                         <div className="text-zinc-400 text-sm mb-8 leading-relaxed">
-                            {description}
+                            {description || "Ready to unlock full access? Book a call or email us to upgrade to the Enterprise Plan."}
                         </div>
 
 
 
                         <button
-                            onClick={() => window.open('https://www.enalsys.com/contact', '_blank')}
-                            className="w-full py-3.5 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-black font-bold rounded-xl transition-all active:scale-[0.98] shadow-lg shadow-amber-500/20"
+                            onClick={() => window.open(ENALSYS_BOOKING_URL, '_blank')}
+                            className="w-full py-3.5 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-black font-bold rounded-xl transition-all active:scale-[0.98] shadow-lg shadow-amber-500/20 mb-3"
                         >
-                            Upgrade to Enterprise
+                            Book a Call with Enalsys
                         </button>
+
+                        <a
+                            href={`mailto:${ENALSYS_EMAIL}`}
+                            className="text-zinc-500 hover:text-white text-sm font-medium transition-colors"
+                        >
+                            Email us at {ENALSYS_EMAIL}
+                        </a>
 
 
                     </div>

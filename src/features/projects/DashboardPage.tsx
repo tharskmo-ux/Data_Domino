@@ -11,10 +11,13 @@ import { useProjects } from './ProjectContext';
 import AppSidebar, { type ETLStep } from '../../components/AppSidebar';
 import { motion } from 'framer-motion';
 import ActivityHistory from '../etl/ActivityHistory';
+import { useSubscription } from '../subscription/SubscriptionContext';
+import OrganizationNameModal from '../subscription/OrganizationNameModal';
 
 const DashboardPage = () => {
-    const { user, isDemo, role } = useAuth();
+    const { user, isDemo, role, isAdmin } = useAuth();
     const { projects, createProject, deleteProject, currentProject, setCurrentProject } = useProjects();
+    const { organization } = useSubscription();
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [activeGlobalView, setActiveGlobalView] = useState<ETLStep>('dashboard');
@@ -90,10 +93,8 @@ const DashboardPage = () => {
                 </div>
 
                 <div className="flex items-center gap-4">
-                    {/* Admin Access Button */}
-                    {/* Show for Harshad OR if we are in Demo Mode for testing */}
-                    {/* Admin Access Button - STRICTLY restricted to Harshad */}
-                    {user?.email === 'harshad.am@enalsys.com' && (
+                    {/* Admin Access Button - Restricted to admin role */}
+                    {isAdmin && (
                         <div className="flex gap-2">
                             {/* Admin Testing Tool: Quickly verify what a user sees */}
                             {isDemo && (
@@ -147,6 +148,10 @@ const DashboardPage = () => {
                     onClose={() => setIsSettingsOpen(false)}
                 />
 
+                <OrganizationNameModal
+                    isOpen={organization !== null && organization.companyName === null && !isDemo}
+                />
+
                 <main className="flex-1 overflow-y-auto pl-80 relative z-10">
                     <div className="max-w-7xl mx-auto p-8">
 
@@ -155,7 +160,9 @@ const DashboardPage = () => {
                             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
                                 <div className="flex justify-between items-end mb-10">
                                     <div>
-                                        <h1 className="text-3xl font-bold mb-2">Welcome back, {user?.displayName?.split(' ')[0] || 'User'}</h1>
+                                        <h1 className="text-3xl font-bold mb-2">
+                                            Welcome back to {organization?.companyName || organization?.adminEmail?.split('@')[1] || 'Data Domino'}, {user?.displayName?.split(' ')[0] || 'User'}
+                                        </h1>
                                         <p className="text-zinc-400">Here's an overview of your procurement data projects.</p>
                                     </div>
                                     <button
@@ -340,7 +347,7 @@ const DashboardPage = () => {
 
                     </div>
                 </main>
-            </div>
+            </div >
 
 
             <CreateProjectModal
@@ -348,7 +355,7 @@ const DashboardPage = () => {
                 onClose={() => setIsModalOpen(false)}
                 onCreate={handleCreateProject}
             />
-        </div>
+        </div >
     );
 };
 

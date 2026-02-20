@@ -80,10 +80,18 @@ const AppSidebar: React.FC<AppSidebarProps> = ({ activeStep, onNavigate, current
                     </>
                 ) : (
                     <div className="flex items-center gap-3 w-full">
-                        <div className="w-8 h-8 bg-primary rounded flex items-center justify-center shrink-0">
-                            <span className="text-white font-bold text-lg">D</span>
+                        <div className="w-8 h-8 bg-gradient-to-br from-primary to-emerald-600 rounded-lg flex items-center justify-center shrink-0 shadow-lg shadow-primary/20">
+                            <span className="text-white font-black text-lg tracking-tighter">D</span>
                         </div>
-                        <span className="text-xl font-bold tracking-tight text-white">Data Domino</span>
+                        <div className="flex flex-col">
+                            <span className="text-lg font-bold tracking-tight text-white leading-none">Data Domino</span>
+                            <div className="flex items-center gap-1.5 mt-1">
+                                <span className="p-0.5 bg-emerald-500/10 border border-emerald-500/20 rounded-full">
+                                    <CheckCircle2 className="h-2 w-2 text-emerald-500" />
+                                </span>
+                                <span className="text-[8px] font-black text-zinc-500 uppercase tracking-widest">Audit Verified</span>
+                            </div>
+                        </div>
                     </div>
                 )}
             </div>

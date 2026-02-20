@@ -1,7 +1,7 @@
 import { Timestamp } from 'firebase/firestore';
 
 export type SubscriptionType = 'FREE' | 'ENTERPRISE';
-export type SubscriptionStatus = 'ACTIVE' | 'PAST_DUE' | 'CANCELLED';
+export type SubscriptionStatus = 'ACTIVE' | 'PAST_DUE' | 'CANCELLED' | 'SUSPENDED';
 
 export interface Subscription {
     type: SubscriptionType;
@@ -13,8 +13,11 @@ export interface Subscription {
 export interface Organization {
     id: string;
     name: string;
-    ownerId: string;
-    ownerEmail?: string; // Helpful for Admin Dashboard
+    companyName: string;
+    userName: string;
+    displayName: string | null;
+    adminId: string;
+    adminEmail: string;
     createdAt: Timestamp;
     subscription: Subscription;
     members: string[]; // Array of user UIDs
@@ -25,5 +28,5 @@ export interface UserProfile {
     email: string;
     displayName: string;
     organizationId?: string; // Link to their organization
-    role: 'OWNER' | 'ADMIN' | 'MEMBER';
+    role: 'admin' | 'enterprise' | 'trial' | 'revoked';
 }
