@@ -16,7 +16,7 @@ import { cn } from '../../lib/utils';
 
 interface Activity {
     id: string;
-    type: 'export' | 'mapping' | 'matching' | 'categorization' | 'upload' | 'header-selection';
+    type: 'export' | 'mapping' | 'matching' | 'categorization' | 'upload' | 'header-selection' | 'creation';
     label: string;
     timestamp: string;
     details?: string;

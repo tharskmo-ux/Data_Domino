@@ -1,17 +1,49 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Check, Zap, Shield, Activity, FileText, Users, ArrowRight, Loader2, Star } from 'lucide-react';
+import { Check, Zap, Shield, Activity, FileText, Users, ArrowRight, Loader2, Star, LogOut, LayoutDashboard } from 'lucide-react';
 import { useAuth } from './AuthContext';
-import { db } from '../../lib/firebase';
+import { useSubscription } from '../subscription/SubscriptionContext';
+import { auth, db } from '../../lib/firebase';
+import { signOut } from 'firebase/auth';
 import { doc, getDoc, updateDoc, setDoc, Timestamp } from 'firebase/firestore';
 import { ENALSYS_BOOKING_URL } from '../../lib/constants';
 import { motion } from 'framer-motion';
+import { useEffect } from 'react';
 
 const PlanSelectionPage: React.FC = () => {
-    const { user } = useAuth();
+    const { user, planSelected } = useAuth();
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const navigate = useNavigate();
+
+    const handleLogout = async () => {
+        try {
+            await signOut(auth);
+            navigate('/login');
+        } catch (error) {
+            console.error('Logout error:', error);
+        }
+    };
+
+    const { loading: subLoading, isSuspended } = useSubscription();
+
+    // Reactive redirect: Move to dashboard as soon as planSelected is synced and confirmed active
+    useEffect(() => {
+        // We only redirect if plan is selected AND subscription is loaded AND NOT suspended
+        if (planSelected && !subLoading && !isSuspended) {
+            console.log("[PlanSelection] Plan active, redirecting to dashboard...");
+            navigate('/');
+        }
+    }, [planSelected, subLoading, isSuspended, navigate]);
+
+    const isExhausted = planSelected && !subLoading && isSuspended;
+
+    // showNavButtons if: 
+    // 1. User hasn't selected a plan (Onboarding)
+    // 2. Plan selected but trial exhausted (Post-onboarding restricted)
+    // 3. Demo mode (for testing visibility)
+    const { isDemo } = useAuth();
+    const showNavButtons = (!planSelected || isExhausted || isDemo);
 
     const handleStartTrial = async () => {
         if (!user) return;
@@ -37,8 +69,8 @@ const PlanSelectionPage: React.FC = () => {
                 });
             }
 
-            // Success - Move to home
-            navigate('/');
+            // DO NOT navigate manually here. 
+            // The useEffect above will handle it once AuthContext syncs.
         } catch (error: any) {
             console.error('Trial activation error:', error);
             setError(`Activation failed: ${error.message || 'Permission Denied'}`);
@@ -56,6 +88,27 @@ const PlanSelectionPage: React.FC = () => {
             {/* Background elements */}
             <div className="absolute top-0 right-0 w-[500px] h-[500px] bg-primary/5 blur-[120px] rounded-full pointer-events-none" />
             <div className="absolute bottom-0 left-0 w-[500px] h-[500px] bg-emerald-500/5 blur-[120px] rounded-full pointer-events-none" />
+
+            {/* Navigation Header */}
+            {showNavButtons && (
+                <div className="absolute top-0 left-0 right-0 p-6 flex justify-between items-center z-50">
+                    <button
+                        onClick={handleLogout}
+                        className="flex items-center gap-2 px-4 py-2 text-zinc-500 hover:text-white font-bold text-[10px] uppercase tracking-[0.2em] transition-colors"
+                    >
+                        <LogOut className="w-4 h-4" /> Logout
+                    </button>
+
+                    {planSelected && (
+                        <button
+                            onClick={() => navigate('/')}
+                            className="flex items-center gap-2 px-6 py-2.5 bg-zinc-900/50 border border-zinc-800 hover:border-zinc-700/50 rounded-xl text-white font-bold text-[10px] uppercase tracking-[0.2em] transition-all"
+                        >
+                            <LayoutDashboard className="w-4 h-4" /> Go to Dashboard
+                        </button>
+                    )}
+                </div>
+            )}
 
             <div className="max-w-6xl w-full relative z-10 flex flex-col items-center">
                 <div className="mb-12 text-center">

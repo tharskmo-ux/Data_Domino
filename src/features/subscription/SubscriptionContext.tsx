@@ -9,7 +9,7 @@ interface SubscriptionContextType {
     organization: Organization | null;
     subscription: Subscription | null;
     loading: boolean;
-    checkAccess: (feature: 'advanced_export' | 'unlimited_projects' | 'team_management') => boolean;
+    checkAccess: (feature: 'advanced_export' | 'unlimited_projects' | 'team_management' | 'savings_roi') => boolean;
     updateCompanyName: (name: string) => Promise<void>;
     upgradeToEnterprise: () => Promise<void>; // For demo/admin purposes
     isSuspended: boolean;

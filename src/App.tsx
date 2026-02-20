@@ -1,8 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { doc, getDoc } from 'firebase/firestore';
-import { db } from './lib/firebase';
 import { AuthProvider, useAuth } from './features/auth/AuthContext';
 import { ProjectProvider } from './features/projects/ProjectContext';
 import { SubscriptionProvider } from './features/subscription/SubscriptionContext';
@@ -41,40 +39,19 @@ const AdminRoute = ({ children }: { children: React.ReactNode }) => {
 };
 
 const PlanSelectionRoute = ({ children }: { children: React.ReactNode }) => {
-  const { user, loading } = useAuth();
-  const [planSelected, setPlanSelected] = useState<boolean | null>(null);
-  const [checking, setChecking] = useState(true);
+  const { user, loading, isAdmin, planSelected } = useAuth();
 
-  useEffect(() => {
-    if (!user) {
-      setChecking(false);
-      return;
-    }
-    const checkPlan = async () => {
-      try {
-        const docSnap = await getDoc(doc(db, 'user_roles', user.uid));
-        if (docSnap.exists()) {
-          setPlanSelected(docSnap.data().planSelected === true);
-        } else {
-          setPlanSelected(false);
-        }
-      } catch (error) {
-        console.error('Plan check error:', error);
-        setPlanSelected(false);
-      } finally {
-        setChecking(false);
-      }
-    };
-    checkPlan();
-  }, [user]);
-
-  if (loading || checking) return (
+  if (loading) return (
     <div className="h-screen w-screen flex items-center justify-center bg-zinc-950">
       <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-primary"></div>
     </div>
   );
 
   if (!user) return <Navigate to="/login" replace />;
+
+  // Administrators bypass the plan selection flow
+  if (isAdmin) return <>{children}</>;
+
   if (!planSelected) return <Navigate to="/plan-selection" replace />;
   return <>{children}</>;
 };

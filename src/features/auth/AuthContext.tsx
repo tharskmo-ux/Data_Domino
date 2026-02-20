@@ -3,7 +3,7 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { onAuthStateChanged, sendPasswordResetEmail, signOut, type User } from 'firebase/auth';
 import { auth, db, IS_DEMO_MODE } from '../../lib/firebase';
-import { doc, getDoc, setDoc, Timestamp } from 'firebase/firestore';
+import { doc, onSnapshot, setDoc, Timestamp } from 'firebase/firestore';
 
 export type UserRole = 'admin' | 'enterprise' | 'trial' | 'revoked' | 'none';
 
@@ -50,18 +50,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             return;
         }
 
-        const unsubscribe = onAuthStateChanged(auth, async (authenticatedUser) => {
+        const unsubscribe = onAuthStateChanged(auth, (authenticatedUser) => {
             if (authenticatedUser) {
-                try {
-                    const roleRef = doc(db, 'user_roles', authenticatedUser.uid);
-                    const roleSnap = await getDoc(roleRef);
+                const roleRef = doc(db, 'user_roles', authenticatedUser.uid);
 
+                // Use onSnapshot for real-time role updates
+                const unsubscribeRole = onSnapshot(roleRef, async (roleSnap) => {
                     if (roleSnap.exists()) {
                         const data = roleSnap.data();
                         const activeRole = data.role as UserRole;
                         const isPlanSelected = data.planSelected || false;
 
-                        console.log(`[Auth] User Resolved: role=${activeRole}, planSelected=${isPlanSelected}`);
+                        console.log(`[Auth] Role Sync: role=${activeRole}, planSelected=${isPlanSelected}`);
                         setPlanSelected(isPlanSelected);
 
                         if (activeRole === 'revoked') {
@@ -72,37 +72,47 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                             return;
                         }
 
-                        // Set admin, enterprise, or trial (anything else defaults to trial)
                         if (['admin', 'enterprise', 'trial'].includes(activeRole)) {
                             setRole(activeRole);
                         } else {
                             setRole('trial');
                         }
+                        setUser(authenticatedUser);
+                        setLoading(false);
                     } else {
-                        // Document DOES NOT EXIST (Brand new signup)
+                        // Document DOES NOT EXIST (First time sync)
+                        // Fallback to one-time creation if doc is missing
                         const initialRole: UserRole = 'trial';
-                        await setDoc(roleRef, {
-                            role: initialRole,
-                            email: authenticatedUser.email,
-                            displayName: authenticatedUser.displayName || (authenticatedUser.email ? authenticatedUser.email.split('@')[0] : 'User'),
-                            createdAt: Timestamp.now(),
-                            planSelected: false
-                        });
-                        setRole(initialRole);
-                        setPlanSelected(false);
+                        try {
+                            await setDoc(roleRef, {
+                                role: initialRole,
+                                email: authenticatedUser.email,
+                                displayName: authenticatedUser.displayName || (authenticatedUser.email ? authenticatedUser.email.split('@')[0] : 'User'),
+                                createdAt: Timestamp.now(),
+                                planSelected: false
+                            });
+                            // onSnapshot will trigger after setDoc
+                        } catch (e) {
+                            console.error("Auth bootstrap failed", e);
+                            setRole('trial');
+                            setUser(authenticatedUser);
+                            setLoading(false);
+                        }
                     }
-                } catch (error) {
+                }, (error) => {
                     console.error("[Auth] Role resolution error:", error);
-                    // If anything fails, default to trial and never block the user
                     setRole('trial');
-                }
+                    setUser(authenticatedUser);
+                    setLoading(false);
+                });
+
+                return () => unsubscribeRole();
             } else {
                 setRole('none');
                 setPlanSelected(false);
+                setUser(null);
+                setLoading(false);
             }
-
-            setUser(authenticatedUser);
-            setLoading(false);
         });
 
         return () => unsubscribe();

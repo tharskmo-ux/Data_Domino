@@ -16,7 +16,8 @@ import {
     AlertCircle,
     Lock,
     Calendar,
-    Mail
+    Mail,
+    ArrowLeft
 } from 'lucide-react';
 import { ExcelGenerator } from '../../utils/ExcelGenerator';
 import TeamManagement from './TeamManagement';
@@ -138,6 +139,25 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
             }, 300);
             setClickTimeout(timeout);
         }
+    };
+
+    const formatCurrency = (val: number, isCompact = true) => {
+        if (currency === 'INR' && isCompact) {
+            if (val >= 10000000) return `₹${(val / 10000000).toFixed(1)} Cr`;
+            if (val >= 100000) return `₹${(val / 100000).toFixed(1)} L`;
+        }
+        return new Intl.NumberFormat('en-IN', {
+            style: 'currency',
+            currency: currency,
+            maximumSignificantDigits: 3,
+            notation: isCompact ? 'compact' : 'standard'
+        }).format(val);
+    };
+
+    const formatValue = (val: any, type: string) => {
+        if (type === 'currency') return formatCurrency(val);
+        if (type === 'percent') return `${typeof val === 'number' ? val.toFixed(1) : val}%`;
+        return val;
     };
 
     const filteredClusters = useMemo(() => {
@@ -814,24 +834,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
         };
     }, [data, mappings, clusters, dateRange, filters]);
 
-    const formatCurrency = (val: number, isCompact = true) => {
-        if (currency === 'INR' && isCompact) {
-            if (val >= 10000000) return `₹${(val / 10000000).toFixed(1)} Cr`;
-            if (val >= 100000) return `₹${(val / 100000).toFixed(1)} L`;
-        }
-        return new Intl.NumberFormat('en-IN', {
-            style: 'currency',
-            currency: currency,
-            maximumSignificantDigits: 3,
-            notation: isCompact ? 'compact' : 'standard'
-        }).format(val);
-    };
 
-    const formatValue = (val: any, type: string) => {
-        if (type === 'currency') return formatCurrency(val);
-        if (type === 'percent') return `${typeof val === 'number' ? val.toFixed(1) : val}%`;
-        return val;
-    };
 
     const handleExportExcel = async () => {
         const rowsToExport = dynamicStats?.filteredRows || data;
@@ -1132,24 +1135,23 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                 </div>
 
                                 <div className="bg-zinc-900/40 border border-zinc-800 rounded-[2.5rem] p-8 flex flex-col justify-center relative overflow-hidden group">
-                                    <div className={cn(
-                                        "absolute inset-0 bg-zinc-950/40 backdrop-blur-[2px] z-20 transition-all duration-700",
-                                        checkAccess('savings_roi') ? "group-hover:backdrop-blur-0" : "backdrop-blur-sm"
-                                    )} />
                                     {!checkAccess('savings_roi') && (
-                                        <div className="relative z-30 text-center py-6">
-                                            <div className="w-12 h-12 rounded-2xl bg-zinc-800 border border-zinc-700 mx-auto mb-4 flex items-center justify-center text-zinc-500">
-                                                <MoreHorizontal className="w-6 h-6" />
+                                        <>
+                                            <div className="absolute inset-0 bg-zinc-950/40 backdrop-blur-sm z-20 transition-all duration-700 group-hover:backdrop-blur-[2px]" />
+                                            <div className="relative z-30 text-center py-6">
+                                                <div className="w-12 h-12 rounded-2xl bg-zinc-800 border border-zinc-700 mx-auto mb-4 flex items-center justify-center text-zinc-500">
+                                                    <MoreHorizontal className="w-6 h-6" />
+                                                </div>
+                                                <h3 className="text-white font-bold text-sm mb-1 uppercase tracking-widest">Levers Gated</h3>
+                                                <p className="text-[10px] text-zinc-500 font-bold px-4 leading-relaxed uppercase tracking-tighter">
+                                                    Savings Breakdown requires <br /> strategic calibration
+                                                </p>
                                             </div>
-                                            <h3 className="text-white font-bold text-sm mb-1 uppercase tracking-widest">Levers Gated</h3>
-                                            <p className="text-[10px] text-zinc-500 font-bold px-4 leading-relaxed uppercase tracking-tighter">
-                                                Savings Breakdown requires <br /> strategic calibration
-                                            </p>
-                                        </div>
+                                        </>
                                     )}
                                     <div className={cn(
-                                        "relative z-10 transition-all duration-500 pointer-events-none select-none",
-                                        !checkAccess('savings_roi') ? "blur-[1px] opacity-40 group-hover:blur-none group-hover:opacity-100" : "opacity-100"
+                                        "relative z-10 transition-all duration-500",
+                                        !checkAccess('savings_roi') ? "blur-[2px] opacity-40 group-hover:blur-[1px] group-hover:opacity-60 pointer-events-none select-none" : "opacity-100"
                                     )}>
                                         <div className="space-y-4">
                                             {dynamicStats.savingsLevers.map((lever) => (
@@ -1462,9 +1464,17 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                 className="bg-zinc-900/40 border border-zinc-900 rounded-[2.5rem] overflow-hidden backdrop-blur-sm min-h-[400px] flex flex-col"
                             >
                                 <div className="p-8 border-b border-zinc-900 flex justify-between items-center bg-zinc-900/20 shrink-0">
-                                    <div>
-                                        <h3 className="text-2xl font-bold">Master Vendor Directory</h3>
-                                        <p className="text-sm text-zinc-500">{filteredClusters.length} Results normalized across {data.length} system records</p>
+                                    <div className="flex items-center gap-4">
+                                        <button
+                                            onClick={() => _setActiveTab('overview')}
+                                            className="p-2 hover:bg-zinc-800 rounded-xl text-zinc-400 transition-colors shrink-0"
+                                        >
+                                            <ArrowLeft className="h-5 w-5" />
+                                        </button>
+                                        <div>
+                                            <h3 className="text-2xl font-bold">Master Vendor Directory</h3>
+                                            <p className="text-sm text-zinc-500">{filteredClusters.length} Results normalized across {data.length} system records</p>
+                                        </div>
                                     </div>
                                     <div className="flex gap-3">
                                         <div className="relative">
@@ -1539,17 +1549,25 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                 className="space-y-8"
                             >
                                 <div className="flex justify-between items-center bg-zinc-900/40 p-6 rounded-[2rem] border border-zinc-900">
-                                    <div>
-                                        {isAdmin && (
-                                            <div className="flex items-center gap-2 mb-2">
-                                                <span className="bg-emerald-500/10 text-emerald-500 text-[10px] font-black px-2 py-0.5 rounded-full border border-emerald-500/20 uppercase tracking-widest flex items-center gap-1">
-                                                    <ShieldCheck className="w-3 h-3" /> Admin View Active
-                                                </span>
-                                                <span className="text-zinc-500 text-[10px] font-bold uppercase tracking-widest">• Total Identified Opportunity: {formatCurrency(dynamicStats.identifiedSavings)}</span>
-                                            </div>
-                                        )}
-                                        <h3 className="text-2xl font-bold text-white">Savings & ROI Analysis</h3>
-                                        <p className="text-zinc-500 text-sm">Actionable opportunities to reduce spend</p>
+                                    <div className="flex items-center gap-4">
+                                        <button
+                                            onClick={() => _setActiveTab('overview')}
+                                            className="p-2 hover:bg-zinc-800 rounded-xl text-zinc-400 transition-colors shrink-0"
+                                        >
+                                            <ArrowLeft className="h-5 w-5" />
+                                        </button>
+                                        <div>
+                                            {isAdmin && (
+                                                <div className="flex items-center gap-2 mb-2">
+                                                    <span className="bg-emerald-500/10 text-emerald-500 text-[10px] font-black px-2 py-0.5 rounded-full border border-emerald-500/20 uppercase tracking-widest flex items-center gap-1">
+                                                        <ShieldCheck className="w-3 h-3" /> Admin View Active
+                                                    </span>
+                                                    <span className="text-zinc-500 text-[10px] font-bold uppercase tracking-widest">• Total Identified Opportunity: {formatCurrency(dynamicStats.identifiedSavings)}</span>
+                                                </div>
+                                            )}
+                                            <h3 className="text-2xl font-bold text-white">Savings & ROI Analysis</h3>
+                                            <p className="text-zinc-500 text-sm">Actionable opportunities to reduce spend</p>
+                                        </div>
                                     </div>
                                     <button
                                         onClick={() => alert('Unlock Full ROI Analysis & Detailed Documentation by connecting with our procurement team.')}

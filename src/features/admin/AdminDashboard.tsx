@@ -15,7 +15,6 @@ import {
     ArrowLeft,
     Users,
     Zap,
-    Shield,
     AlertCircle,
     CheckCircle2,
     XCircle,
@@ -303,9 +302,9 @@ const AdminDashboard = () => {
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-12">
                 {[
                     { label: "Total Users", value: stats.total, icon: Users, color: "text-white" },
-                    { label: "Admin Fleet", value: stats.admins, icon: Shield, color: "text-red-500" },
                     { label: "Enterprise", value: stats.enterprise, icon: Zap, color: "text-primary" },
-                    { label: "Trial Access", value: stats.trial, icon: Activity, color: "text-amber-500" }
+                    { label: "Trial Access", value: stats.trial, icon: Activity, color: "text-amber-500" },
+                    { label: "Revoked Access", value: stats.revoked, icon: AlertCircle, color: "text-red-500" }
                 ].map((s, i) => (
                     <div key={i} className="bg-zinc-900/40 border border-zinc-800/50 rounded-3xl p-6 relative overflow-hidden group hover:border-zinc-700/50 transition-all">
                         <div className="flex items-start justify-between relative z-10">

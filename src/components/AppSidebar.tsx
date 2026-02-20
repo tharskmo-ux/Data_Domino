@@ -162,6 +162,7 @@ const AppSidebar: React.FC<AppSidebarProps> = ({ activeStep, onNavigate, current
                 })}
             </nav>
 
+
             <div className="p-4 border-t border-zinc-900 space-y-1 shrink-0">
                 <button
                     onClick={() => onNavigate('history')}

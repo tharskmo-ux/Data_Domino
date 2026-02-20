@@ -121,7 +121,17 @@ const DashboardPage = () => {
 
                     <div className="flex flex-col items-end mr-2">
                         <span className="text-sm font-medium text-zinc-200">{user?.displayName || 'User'}</span>
-                        <span className="text-[10px] text-zinc-500 font-medium">{user?.email}</span>
+                        <div className="flex items-center gap-2">
+                            <span className={cn(
+                                "px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-widest border",
+                                role === 'admin' ? "bg-red-500/10 text-red-400 border-red-500/20" :
+                                    role === 'enterprise' ? "bg-primary/10 text-primary border-primary/20" :
+                                        "bg-amber-500/10 text-amber-400 border-amber-500/20"
+                            )}>
+                                {role === 'admin' ? 'Admin' : role === 'enterprise' ? 'Enterprise' : 'Trial'}
+                            </span>
+                            <span className="text-[10px] text-zinc-500 font-medium">{user?.email}</span>
+                        </div>
                     </div>
                     <button
                         onClick={handleSignOut}

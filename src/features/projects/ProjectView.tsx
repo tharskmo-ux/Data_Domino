@@ -42,7 +42,7 @@ const ExportButton = () => {
 };
 
 const ProjectView: React.FC = () => {
-    const { role } = useAuth();
+    const { role, user } = useAuth();
     const { currentProject, setCurrentProject, updateProject, deleteProject, addActivity, updateProjectCache } = useProjects();
     const [activeStep, setActiveStep] = useState<ETLStep>('dashboard');
 
@@ -472,6 +472,18 @@ const ProjectView: React.FC = () => {
                     </div>
 
                     <div className="flex items-center gap-3">
+                        {/* Plan Badge */}
+                        <div className="flex items-center gap-2 mr-2">
+                            <span className={cn(
+                                "px-2.5 py-1 rounded-full text-[9px] font-black uppercase tracking-widest border",
+                                role === 'admin' ? "bg-red-500/10 text-red-400 border-red-500/20" :
+                                    role === 'enterprise' ? "bg-primary/10 text-primary border-primary/20" :
+                                        "bg-amber-500/10 text-amber-400 border-amber-500/20"
+                            )}>
+                                {role === 'admin' ? 'Admin' : role === 'enterprise' ? 'Enterprise' : 'Trial'}
+                            </span>
+                            <span className="text-zinc-500 text-xs font-medium hidden md:inline">{user?.displayName || user?.email?.split('@')[0]}</span>
+                        </div>
                         <div className="px-3 py-1.5 bg-zinc-900 rounded-lg text-xs font-bold text-zinc-400 flex items-center gap-2">
                             <FileCheck2 className="h-4 w-4 text-zinc-600" /> Last Save: Just now
                         </div>
