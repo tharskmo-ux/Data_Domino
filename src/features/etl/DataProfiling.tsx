@@ -7,9 +7,15 @@ import {
 interface DataProfilingProps {
     data: any[];
     headers: string[];
+    normalizationSummary?: {
+        currenciesDetected: string[];
+        rowsConverted: number;
+        assumptionsMade: boolean;
+        totalRows: number;
+    };
 }
 
-const DataProfiling: React.FC<DataProfilingProps> = ({ data, headers }) => {
+const DataProfiling: React.FC<DataProfilingProps> = ({ data, headers, normalizationSummary }) => {
     const profile = useMemo(() => {
         if (!data || data.length === 0) return null;
 
@@ -72,6 +78,59 @@ const DataProfiling: React.FC<DataProfilingProps> = ({ data, headers }) => {
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                {/* Currency Normalization */}
+                <div className="bg-zinc-900/50 border border-zinc-800 rounded-3xl p-6 flex flex-col justify-between">
+                    <div>
+                        <h3 className="text-sm font-bold text-zinc-400 uppercase tracking-widest flex items-center gap-2 mb-6">
+                            <Activity className="h-4 w-4" /> Currency Normalization
+                        </h3>
+
+                        <div className="space-y-4">
+                            <div className="grid grid-cols-2 gap-2">
+                                <div className="p-3 bg-zinc-950 rounded-xl border border-zinc-800">
+                                    <div className="text-[10px] text-zinc-500 font-bold uppercase">Detected</div>
+                                    <div className="text-sm font-black text-white truncate">
+                                        {normalizationSummary?.currenciesDetected.join(', ') || 'INR'}
+                                    </div>
+                                </div>
+                                <div className="p-3 bg-zinc-950 rounded-xl border border-zinc-800">
+                                    <div className="text-[10px] text-zinc-500 font-bold uppercase">Converted</div>
+                                    <div className="text-sm font-black text-white">
+                                        {normalizationSummary?.rowsConverted || 0} rows
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="space-y-2">
+                                <div className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">Conversion Rates</div>
+                                <div className="grid grid-cols-3 gap-2">
+                                    <div className="px-2 py-1 bg-zinc-950 rounded border border-zinc-900 text-[10px] flex justify-between">
+                                        <span className="text-zinc-500">USD</span>
+                                        <span className="text-primary font-bold">84</span>
+                                    </div>
+                                    <div className="px-2 py-1 bg-zinc-950 rounded border border-zinc-900 text-[10px] flex justify-between">
+                                        <span className="text-zinc-500">EUR</span>
+                                        <span className="text-primary font-bold">91</span>
+                                    </div>
+                                    <div className="px-2 py-1 bg-zinc-950 rounded border border-zinc-900 text-[10px] flex justify-between">
+                                        <span className="text-zinc-500">GBP</span>
+                                        <span className="text-primary font-bold">106</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {normalizationSummary?.assumptionsMade && (
+                                <div className="flex items-center gap-3 p-3 bg-amber-500/5 border border-amber-500/20 rounded-xl">
+                                    <AlertCircle className="h-4 w-4 text-amber-500 shrink-0" />
+                                    <p className="text-[10px] font-bold text-amber-500 leading-tight">
+                                        Currency not detected for some rows — assumed INR. Please verify.
+                                    </p>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+
                 {/* Fill Rate Chart */}
                 <div className="lg:col-span-2 bg-zinc-900/50 border border-zinc-800 rounded-3xl p-6">
                     <h3 className="text-sm font-bold text-zinc-400 mb-6 uppercase tracking-widest flex items-center gap-2">
@@ -106,7 +165,9 @@ const DataProfiling: React.FC<DataProfilingProps> = ({ data, headers }) => {
                         </ResponsiveContainer>
                     </div>
                 </div>
+            </div>
 
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                 {/* Uniqueness & Schema */}
                 <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 space-y-6">
                     <h3 className="text-sm font-bold text-zinc-400 uppercase tracking-widest flex items-center gap-2">
@@ -139,32 +200,37 @@ const DataProfiling: React.FC<DataProfilingProps> = ({ data, headers }) => {
                         </div>
                     </div>
                 </div>
-            </div>
 
-            {/* Recommendations */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {profile.stats.filter(s => s.fillRate < 90).map((s, idx) => (
-                    <div key={idx} className="flex items-center gap-4 p-4 bg-zinc-900/30 border border-zinc-900 rounded-2xl">
-                        <div className="h-8 w-8 rounded-xl bg-rose-500/10 flex items-center justify-center">
-                            <Info className="h-4 w-4 text-rose-500" />
-                        </div>
-                        <div>
-                            <div className="text-xs font-bold text-white">Low data density in "{s.header}"</div>
-                            <p className="text-[10px] text-zinc-500 mt-0.5">{s.nullCount} missing values detected.</p>
-                        </div>
+                {/* Recommendations */}
+                <div className="space-y-4">
+                    <h3 className="text-sm font-bold text-zinc-400 uppercase tracking-widest flex items-center gap-2">
+                        <Info className="h-4 w-4" /> System Recommendations
+                    </h3>
+                    <div className="grid grid-cols-1 gap-4">
+                        {profile.stats.filter(s => s.fillRate < 90).slice(0, 3).map((s, idx) => (
+                            <div key={idx} className="flex items-center gap-4 p-4 bg-zinc-900/30 border border-zinc-900 rounded-2xl">
+                                <div className="h-8 w-8 rounded-xl bg-rose-500/10 flex items-center justify-center">
+                                    <Info className="h-4 w-4 text-rose-500" />
+                                </div>
+                                <div>
+                                    <div className="text-xs font-bold text-white">Low density: "{s.header}"</div>
+                                    <p className="text-[10px] text-zinc-500 mt-0.5">{s.nullCount} missing values.</p>
+                                </div>
+                            </div>
+                        ))}
+                        {profile.stats.filter(s => s.fillRate >= 99).length > 2 && (
+                            <div className="flex items-center gap-4 p-4 bg-emerald-500/5 border border-emerald-500/10 rounded-2xl">
+                                <div className="h-8 w-8 rounded-xl bg-emerald-500/10 flex items-center justify-center">
+                                    <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                                </div>
+                                <div>
+                                    <div className="text-xs font-bold text-emerald-500">Perfect Signal: Primary Keys</div>
+                                    <p className="text-[10px] text-zinc-500 mt-0.5">High integrity columns found.</p>
+                                </div>
+                            </div>
+                        )}
                     </div>
-                ))}
-                {profile.stats.filter(s => s.fillRate >= 99).length > 2 && (
-                    <div className="flex items-center gap-4 p-4 bg-emerald-500/5 border border-emerald-500/10 rounded-2xl">
-                        <div className="h-8 w-8 rounded-xl bg-emerald-500/10 flex items-center justify-center">
-                            <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-                        </div>
-                        <div>
-                            <div className="text-xs font-bold text-emerald-500">Perfect Signal: Primary Keys</div>
-                            <p className="text-[10px] text-zinc-500 mt-0.5">High integrity columns found for reliable mapping.</p>
-                        </div>
-                    </div>
-                )}
+                </div>
             </div>
         </div>
     );

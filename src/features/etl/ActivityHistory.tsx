@@ -16,7 +16,7 @@ import { cn } from '../../lib/utils';
 
 interface Activity {
     id: string;
-    type: 'export' | 'mapping' | 'matching' | 'categorization' | 'upload';
+    type: 'export' | 'mapping' | 'matching' | 'categorization' | 'upload' | 'header-selection';
     label: string;
     timestamp: string;
     details?: string;
@@ -35,6 +35,7 @@ const ActivityHistory: React.FC<ActivityHistoryProps> = ({ activities }) => {
             case 'matching': return <UserCircle2 className="h-4 w-4" />;
             case 'categorization': return <Tag className="h-4 w-4" />;
             case 'upload': return <Upload className="h-4 w-4" />;
+            case 'header-selection': return <Search className="h-4 w-4" />;
             default: return <Clock className="h-4 w-4" />;
         }
     };
@@ -46,6 +47,7 @@ const ActivityHistory: React.FC<ActivityHistoryProps> = ({ activities }) => {
             case 'matching': return 'text-amber-500 bg-amber-500/10 border-amber-500/20';
             case 'categorization': return 'text-rose-500 bg-rose-500/10 border-rose-500/20';
             case 'upload': return 'text-emerald-500 bg-emerald-500/10 border-emerald-500/20';
+            case 'header-selection': return 'text-orange-500 bg-orange-500/10 border-orange-500/20';
             default: return 'text-zinc-500 bg-zinc-500/10 border-zinc-500/20';
         }
     };

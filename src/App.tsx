@@ -30,6 +30,8 @@ import AdminDashboard from './features/admin/AdminDashboard';
 
 // ... (ProtectedRoute component)
 
+import ForgotPasswordPage from './features/auth/ForgotPasswordPage';
+
 function App() {
   return (
     <QueryClientProvider client={queryClient}>
@@ -40,6 +42,7 @@ function App() {
               <Routes>
                 <Route path="/login" element={<LoginPage />} />
                 <Route path="/signup" element={<SignupPage />} />
+                <Route path="/forgot-password" element={<ForgotPasswordPage />} />
                 <Route path="/" element={
                   <ProtectedRoute>
                     <DashboardPage />

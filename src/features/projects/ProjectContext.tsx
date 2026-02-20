@@ -17,7 +17,7 @@ export interface Project {
     };
     activities: {
         id: string;
-        type: 'export' | 'mapping' | 'matching' | 'categorization' | 'upload';
+        type: 'export' | 'mapping' | 'matching' | 'categorization' | 'upload' | 'header-selection';
         label: string;
         timestamp: string;
         details?: string;

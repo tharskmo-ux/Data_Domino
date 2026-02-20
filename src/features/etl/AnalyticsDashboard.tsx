@@ -13,7 +13,9 @@ import {
     Wallet,
     Users,
     Zap,
-    AlertCircle
+    AlertCircle,
+    Lock,
+    Calendar
 } from 'lucide-react';
 import { ExcelGenerator } from '../../utils/ExcelGenerator';
 import TeamManagement from './TeamManagement';
@@ -21,16 +23,18 @@ import SupplierListModal from './SupplierListModal';
 import UpgradeModal from './UpgradeModal';
 import {
     ResponsiveContainer, XAxis, YAxis,
-    CartesianGrid, Tooltip, PieChart, Pie, Cell, Area, AreaChart
+    CartesianGrid, Tooltip, PieChart, Pie, Cell, Area, AreaChart, ReferenceLine
 } from 'recharts';
 import { useProjects } from '../projects/ProjectContext';
 import { motion, AnimatePresence } from 'framer-motion';
 import UnlockAnalysisModal from '../subscription/UnlockAnalysisModal';
+import { useAuth } from '../auth/AuthContext';
 import { cn, parseDateValue } from '../../lib/utils';
 import TransactionDrilldown from './TransactionDrilldown';
 import SourcingDrilldown from './SourcingDrilldown';
 import SupplierSummaryDrilldown from './SupplierSummaryDrilldown';
 import SummaryDrilldown from './SummaryDrilldown';
+import { useSubscription } from '../subscription/SubscriptionContext';
 
 interface AnalyticsDashboardProps {
     data: any[];
@@ -43,6 +47,9 @@ interface AnalyticsDashboardProps {
 
 const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings, clusters, initialTab = 'overview', currency = 'INR' }) => {
     const { currentProject, addActivity } = useProjects();
+    const { isAdmin } = useAuth();
+    const { checkAccess } = useSubscription();
+    const canExport = checkAccess('advanced_export');
     const [isTeamModalOpen, setIsTeamModalOpen] = useState(false);
     const [isUnlockModalOpen, setIsUnlockModalOpen] = useState(false);
     const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
@@ -160,13 +167,23 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
         // Calculate totals from filtered rows
         const stats = filteredRows.reduce((acc, row) => {
             const amount = parseFloat(String(row[amountCol] || '0').replace(/[^0-9.-]+/g, "")) || 0;
+            const isContracted = row['Contract_Status'] === 'Contracted';
+
+            // Payment Terms Risk Detection
+            const ptCol = mappings['payment_terms'];
+            const ptValue = String(row[ptCol] || '').toLowerCase();
+            const isPTRisk = /immediate|cash|net 7|net0|pickup/i.test(ptValue);
+
             return {
                 spend: acc.spend + amount,
-                count: acc.count + 1
+                count: acc.count + 1,
+                contractedSpend: acc.contractedSpend + (isContracted ? amount : 0),
+                ptRiskSpend: acc.ptRiskSpend + (isPTRisk ? amount : 0)
             };
-        }, { spend: 0, count: 0 });
+        }, { spend: 0, count: 0, contractedSpend: 0, ptRiskSpend: 0 });
 
         const totalSpend = stats.spend;
+        const contractedPercent = totalSpend > 0 ? (stats.contractedSpend / totalSpend) * 100 : 0;
         const vendorCount = clusters.length > 0 ? clusters.length : new Set(filteredRows.map(r => String(r[mappings['supplier']] || ''))).size;
 
         // 0. Global Pre-calculation for Item Details (Min Price & Sourcing Status)
@@ -218,6 +235,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
         const buMap: Record<string, number> = {};
         const locMap: Record<string, number> = {};
         const poSet = new Set<string>();
+        const poMap: Record<string, number> = {};
         let compliantSpend = 0;
 
         // Calculate distribution maps
@@ -247,6 +265,21 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
             compliance: 0,
             tailSpend: 0,
             processEfficiency: 0
+        };
+
+        // Detailed opportunity data for drill-down
+        const opportunityDetails: Record<string, {
+            spend: number,
+            savings: number,
+            vendors: Record<string, number>,
+            categories: Set<string>,
+            itemCount: number
+        }> = {
+            priceVariance: { spend: 0, savings: 0, vendors: {}, categories: new Set(), itemCount: 0 },
+            singleSource: { spend: 0, savings: 0, vendors: {}, categories: new Set(), itemCount: 0 },
+            compliance: { spend: 0, savings: 0, vendors: {}, categories: new Set(), itemCount: 0 },
+            tailSpend: { spend: 0, savings: 0, vendors: {}, categories: new Set(), itemCount: 0 },
+            processEfficiency: { spend: 0, savings: 0, vendors: {}, categories: new Set(), itemCount: 0 }
         };
 
         // Identify Tail Suppliers (Global Set for consistency or Local? Let's use Global for 'True' Tail definition)
@@ -325,10 +358,23 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                 logicType = 'singleSource';
             }
 
-            // 3. Contract Compliance
+            // 3. Contract & Category-Specific Consolidation Savings
             if (rowSavings === 0 && !contract) {
-                // Off-contract spend - potential 5% savings from negotiating contract
-                rowSavings = amount * 0.05;
+                // Category-specific rates based on realistically achievable mid-market negotiation outcomes
+                const catLower = cat.toLowerCase();
+                let rate = 0.05; // Default 5%
+
+                if (catLower.includes('material') || catLower.includes('mfg') || catLower.includes('production')) {
+                    rate = 0.08;
+                } else if (catLower.includes('it') || catLower.includes('tech') || catLower.includes('software')) {
+                    rate = 0.06;
+                } else if (catLower.includes('logistics') || catLower.includes('transport') || catLower.includes('freight')) {
+                    rate = 0.07;
+                } else if (catLower.includes('facility') || catLower.includes('housekeeping') || catLower.includes('clean')) {
+                    rate = 0.10;
+                }
+
+                rowSavings = amount * rate;
                 logicType = 'compliance';
             }
 
@@ -349,6 +395,14 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
             if (rowSavings > 0 && logicType) {
                 totalIdentifiedSavings += rowSavings;
                 savingsBreakdown[logicType] += rowSavings;
+
+                // Track details for drill-down
+                const detail = opportunityDetails[logicType];
+                detail.spend += amount;
+                detail.savings += rowSavings;
+                detail.categories.add(String(cat));
+                detail.vendors[supplier] = (detail.vendors[supplier] || 0) + amount;
+                if (item) detail.itemCount++;
             }
 
 
@@ -385,7 +439,11 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
             locMap[loc] = (locMap[loc] || 0) + amount;
 
             // 3. PO & Compliance Population
-            if (row[mappings['po_number']]) poSet.add(String(row[mappings['po_number']]));
+            const po = String(row[mappings['po_number']] || row[mappings['invoice_number']] || 'No Ref');
+            if (row[mappings['po_number']] || row[mappings['invoice_number']]) {
+                poSet.add(po);
+                poMap[po] = (poMap[po] || 0) + amount;
+            }
             if (row[mappings['contract_ref']]) compliantSpend += amount;
 
             // Spend Type Heuristic
@@ -466,22 +524,85 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
         const complianceScore = Math.round((compliantSpend / (totalSpend || 1)) * 100);
         const vsLYGrowth = lySpend > 0 ? ((fySpend - lySpend) / lySpend) * 100 : 0;
 
-        // Tail Spend Pareto
-        const sortedSuppliersBySpend = Object.entries(supplierStatsMap)
+        // 4. Advanced Tail Spend Pareto & Multi-Lens Logic (Refactored)
+        const sortedSuppliersBySpendDesc = Object.entries(supplierStatsMap)
             .map(([name, stats]) => ({ name, spend: stats.spend }))
-            .sort((a, b) => a.spend - b.spend);
+            .sort((a, b) => b.spend - a.spend); // Rank Descending
 
-        let cumulativeSpend = 0;
-        const tailSuppliersList = [];
-        const tailThreshold = totalSpend * 0.2;
-        for (const s of sortedSuppliersBySpend) {
-            if (cumulativeSpend + s.spend <= tailThreshold || tailSuppliersList.length === 0) {
-                tailSuppliersList.push(s.name);
-                cumulativeSpend += s.spend;
-            } else break;
-        }
-        const tailSuppliersSet = new Set(tailSuppliersList);
-        const tailSpendPercentage = Math.round((cumulativeSpend / (totalSpend || 1)) * 1000) / 10;
+        let runningCumSpend = 0;
+        const headSuppliers = new Set<string>();
+        const midTailSuppliers = new Set<string>();
+        const longTailSuppliers = new Set<string>();
+        const finalTailSuppliersSet = new Set<string>();
+        const paretoPoints: { name: string, spend: number, cumPercent: number }[] = [];
+
+        const tailStartThreshold = totalSpend * 0.80; // Pareto 80/20
+        const longTailThreshold = totalSpend * 0.95;
+
+        sortedSuppliersBySpendDesc.forEach((s) => {
+            const prevCumSpend = runningCumSpend;
+            runningCumSpend += s.spend;
+            const cumPercent = (runningCumSpend / (totalSpend || 1)) * 100;
+            const share = (s.spend / (totalSpend || 1)) * 100;
+
+            paretoPoints.push({ name: s.name, spend: s.spend, cumPercent });
+
+            if (prevCumSpend < tailStartThreshold) {
+                headSuppliers.add(s.name);
+            } else if (prevCumSpend < longTailThreshold) {
+                midTailSuppliers.add(s.name);
+            } else {
+                longTailSuppliers.add(s.name);
+            }
+
+            // --- Exclusions Logic ---
+            // Always exclude "protected tail" (Safety, Critical, Regulatory)
+            const isProtected = /safety|critical|spare|regulatory|itar|strategic|contract/i.test(s.name) ||
+                /safety|critical|compliance|regulatory/i.test(supplierStatsMap[s.name].category);
+
+            // Multi-lens flag: Supplier is "Tail" if beyond 80% AND (Spend < 25L OR Share < 0.5%) AND NOT protected
+            const isLowShare = share < 0.5;
+            const isLowAbsolute = s.spend < 2500000;
+            if (prevCumSpend >= tailStartThreshold && (isLowShare || isLowAbsolute) && !isProtected) {
+                finalTailSuppliersSet.add(s.name);
+            }
+        });
+
+        // Transaction Lens Logic
+        const tailTransactions = filteredRows.filter(row => {
+            const rowAmount = parseFloat(String(row[amountCol] || '0').replace(/[^0-9.-]+/g, "")) || 0;
+            const supplier = String(row[mappings['supplier']] || '');
+            const item = String(row[mappings['item_description']] || '').toLowerCase();
+            const isSmallTxn = rowAmount < 50000; // Transaction Limit (e.g. 50k)
+
+            // Exclude item-level critical matches
+            const isItemProtected = item.includes('safety') || item.includes('critical') || item.includes('regulatory');
+
+            return (isSmallTxn || finalTailSuppliersSet.has(supplier)) && !isItemProtected;
+        });
+
+        const tailSpendAmount = filteredRows.reduce((acc, row) => {
+            const supplier = String(row[mappings['supplier']] || '');
+            if (finalTailSuppliersSet.has(supplier)) {
+                return acc + (parseFloat(String(row[amountCol] || '0').replace(/[^0-9.-]+/g, "")) || 0);
+            }
+            return acc;
+        }, 0);
+
+        const tailSpendPercentage = (tailSpendAmount / (totalSpend || 1)) * 100;
+        const tailSuppliersPercentage = (finalTailSuppliersSet.size / (vendorCount || 1)) * 100;
+        const tailTxnsPercentage = (tailTransactions.length / (filteredRows.length || 1)) * 100;
+
+        const tailSummary = {
+            spendPercent: tailSpendPercentage,
+            supplierPercent: tailSuppliersPercentage,
+            txnPercent: tailTxnsPercentage,
+            headCount: headSuppliers.size,
+            midCount: midTailSuppliers.size,
+            longCount: longTailSuppliers.size,
+            tailSuppliers: Array.from(finalTailSuppliersSet),
+            paretoPoints: paretoPoints
+        };
 
         const buSummary = Object.entries(buMap)
             .map(([name, value]) => ({
@@ -498,6 +619,51 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                 share: totalSpend > 0 ? (value / totalSpend) * 100 : 0
             }))
             .sort((a, b) => b.value - a.value);
+
+        const poSummary = Object.entries(poMap)
+            .map(([name, value]) => ({
+                name,
+                value,
+                share: totalSpend > 0 ? (value / totalSpend) * 100 : 0
+            }))
+            .sort((a, b) => b.value - a.value);
+
+        // --- TOP 3 SAVINGS OPPORTUNITIES RANKED BY RUPEE VALUE ---
+        const opportunityRanking = Object.entries(opportunityDetails)
+            .filter(([_, d]) => d.savings > 0)
+            .map(([key, d]) => ({
+                id: key,
+                label: key === 'priceVariance' ? 'Price Arbitrage' :
+                    key === 'singleSource' ? 'Strategic Sourcing' :
+                        key === 'compliance' ? 'Contract Consolidation' :
+                            key === 'tailSpend' ? 'Tail Consolidation' : 'Process Efficiency',
+                value: d.savings,
+                currentSpend: d.spend,
+                percent: d.spend > 0 ? (d.savings / d.spend) * 100 : 0,
+                categories: Array.from(d.categories).slice(0, 3),
+                topVendors: Object.entries(d.vendors)
+                    .sort((a, b) => b[1] - a[1])
+                    .slice(0, 3)
+                    .map(([name, spend]) => ({ name, spend })),
+                projectedSpend: d.spend - d.savings,
+                itemCount: d.itemCount,
+                color: key === 'priceVariance' ? 'rose' :
+                    key === 'singleSource' ? 'amber' :
+                        key === 'compliance' ? 'primary' :
+                            key === 'tailSpend' ? 'teal' : 'zinc',
+                recommendation: key === 'priceVariance' ? 'Standardize unit prices across all locations/suppliers.' :
+                    key === 'singleSource' ? 'Introduce competitive bidding to drive 2-5% price reduction.' :
+                        key === 'compliance' ? 'Shift unverified spend to contracted partners for volume leverage.' :
+                            key === 'tailSpend' ? 'Consolidate multiple small vendors into strategic master partners.' :
+                                'Optimize procurement workflow to reduce high-frequency low-value POs.',
+                calculation: key === 'priceVariance' ? 'Σ ((Current Price - Min Global Price) * Quantity)' :
+                    key === 'singleSource' ? '2.0% Estimated yield on ₹' + formatCurrency(d.spend) + ' un-tendered spend' :
+                        key === 'compliance' ? 'Avg 5-10% category-weighted leverage on ₹' + formatCurrency(d.spend) + ' off-contract spend' :
+                            key === 'tailSpend' ? '10% Process & price saving on ₹' + formatCurrency(d.spend) + ' long-tail spend' :
+                                'Fixed process cost saving of ₹500 per low-value PO'
+            }))
+            .sort((a, b) => b.value - a.value)
+            .slice(0, 3);
 
         const savingsLevers = [
             { id: 'vol', name: "Volume-based discounting", baseProb: 75, color: "#14b8a6" },
@@ -526,7 +692,12 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
             lySpend,
             totalRows: filteredRows.length,
             vendorCount,
-            complianceScore: totalSpend > 0 ? Math.round((compliantSpend / totalSpend) * 100) : 0,
+            complianceScore: Math.round(contractedPercent),
+            contractedPercent,
+            contractedSpend: stats.contractedSpend,
+            unverifiedSpend: totalSpend - stats.contractedSpend,
+            ptRiskSpend: stats.ptRiskSpend,
+            opportunityRanking,
             buData: buSummary.slice(0, 5),
             locData: locSummary.slice(0, 5),
             buSummary,
@@ -557,7 +728,31 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                     ],
                     data: isItemMapped ? sourcingData : null
                 },
-                { id: 'compliance', icon: ShieldCheck, label: 'Contract Compliance', value: complianceScore, type: 'percent', color: 'emerald', data: filteredRows.filter(r => !r[mappings['contract_ref']]) },
+                {
+                    id: 'compliance',
+                    icon: ShieldCheck,
+                    label: 'Contract Compliance',
+                    value: contractedPercent,
+                    type: 'percent',
+                    color: 'emerald',
+                    subMetrics: [
+                        { label: 'Contracted', value: stats.contractedSpend, type: 'currency' },
+                        { label: 'Unverified', value: totalSpend - stats.contractedSpend, type: 'currency' }
+                    ],
+                    data: filteredRows.filter(r => r['Contract_Status'] === 'Unverified')
+                },
+                {
+                    id: 'pt-risk',
+                    icon: AlertCircle,
+                    label: 'Payment Terms Risk',
+                    value: stats.ptRiskSpend,
+                    type: 'currency',
+                    color: 'rose',
+                    subMetrics: [
+                        { label: 'Risk Exposure', value: (stats.ptRiskSpend / (totalSpend || 1)) * 100, type: 'percent' }
+                    ],
+                    data: filteredRows.filter(r => /immediate|cash|net 7|net0|pickup/i.test(String(r[mappings['payment_terms']] || '').toLowerCase()))
+                },
                 {
                     id: 'suppliers', icon: Users, label: 'Spend by Suppliers', value: vendorCount, type: 'number', color: 'teal',
                     subMetrics: [{ label: 'Top 5 Share', value: topSuppliers.slice(0, 5).reduce((acc, s) => acc + s.share, 0), type: 'percent' }],
@@ -573,8 +768,25 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                     id: 'location', icon: AlertCircle, label: 'Spend by Location', value: Object.keys(locMap).length, type: 'number', color: 'rose',
                     topDistribution: locSummary.slice(0, 5), data: locSummary, isSummary: true
                 },
-                { id: 'avg-po', icon: Target, label: 'Average PO Value', value: avgPOValue, type: 'currency', color: 'amber', data: filteredRows },
-                { id: 'tail-spend', icon: AlertCircle, label: 'Tail Spend', value: tailSpendPercentage, type: 'percent', color: 'rose', data: filteredRows.filter(row => tailSuppliersSet.has(String(row[mappings['supplier']] || '').trim())) },
+                {
+                    id: 'avg-po', icon: Target, label: 'Average PO/Invoice Value', value: avgPOValue, type: 'currency', color: 'amber',
+                    data: poSummary, isSummary: true, summaryLabel: 'PO / Invoice Number',
+                    topDistribution: poSummary.slice(0, 5)
+                },
+                {
+                    id: 'tail-spend', icon: AlertCircle, label: 'Tail Spend Analysis', value: tailSpendPercentage, type: 'percent', color: 'rose',
+                    subMetrics: [
+                        { label: 'Tail Suppliers', value: tailSuppliersPercentage, type: 'percent' },
+                        { label: 'Tail Transactions', value: tailTxnsPercentage, type: 'percent' }
+                    ],
+                    topDistribution: [
+                        { name: 'Head (Core Suppliers)', share: Math.round((headSuppliers.size / (vendorCount || 1)) * 100) },
+                        { name: 'Mid-Tail (Consolidation)', share: Math.round((midTailSuppliers.size / (vendorCount || 1)) * 100) },
+                        { name: 'Long-Tail (Tail-End)', share: Math.round((longTailSuppliers.size / (vendorCount || 1)) * 100) }
+                    ],
+                    data: filteredRows.filter(row => finalTailSuppliersSet.has(String(row[mappings['supplier']] || '').trim())),
+                    tailStats: tailSummary
+                },
             ],
             opportunities: clusters
                 .map(s => {
@@ -724,19 +936,23 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                     </button>
 
                     <button
-                        onClick={() => setIsUnlockModalOpen(true)}
+                        onClick={() => canExport ? handleExportExcel() : setIsUnlockModalOpen(true)}
                         disabled={isGeneratingPDF}
                         className={cn(
                             "bg-white hover:bg-zinc-200 text-black px-6 py-3 rounded-2xl font-bold flex items-center gap-2 transition-all shadow-xl shadow-white/5 active:scale-[0.98]",
-                            isGeneratingPDF && "opacity-70 cursor-not-allowed"
+                            isGeneratingPDF && "opacity-70 cursor-not-allowed",
+                            !canExport && "bg-zinc-100"
                         )}
                     >
                         {isGeneratingPDF ? (
                             <Loader2 className="h-4 w-4 animate-spin" />
                         ) : (
-                            <Download className="h-4 w-4" />
+                            <>
+                                {!canExport && <Lock className="h-4 w-4 text-zinc-400" />}
+                                <Download className="h-4 w-4" />
+                            </>
                         )}
-                        Export Analysis (Excel)
+                        {canExport ? "Export Analysis (Excel)" : "Unlock Export (Enterprise)"}
                     </button>
                     <div className="relative" ref={historyRef}>
                         <button
@@ -985,10 +1201,10 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                                             <p className="text-[10px] uppercase tracking-wider text-zinc-600 mb-0.5">{sm.label}</p>
                                                             <p className={cn(
                                                                 "text-xs font-bold",
-                                                                sm.type === 'percent' && sm.value > 0 ? "text-rose-500" :
-                                                                    sm.type === 'percent' && sm.value < 0 ? "text-emerald-500" : "text-white"
+                                                                (sm as any).type === 'percent' && sm.value > 0 ? "text-rose-500" :
+                                                                    (sm as any).type === 'percent' && sm.value < 0 ? "text-emerald-500" : "text-white"
                                                             )}>
-                                                                {formatValue(sm.value, sm.type || 'currency')}
+                                                                {formatValue(sm.value, (sm as any).type || 'currency')}
                                                             </p>
                                                         </div>
                                                     ))}
@@ -1001,6 +1217,42 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                                     "mt-4 space-y-2 transition-all duration-500 overflow-hidden",
                                                     expandedCards.has(card.id) ? "max-h-[500px] overflow-y-auto pr-2 custom-scrollbar" : "max-h-32"
                                                 )}>
+                                                    {card.id === 'tail-spend' && expandedCards.has(card.id) && card.tailStats?.paretoPoints && (
+                                                        <div className="h-40 w-full mb-6 mt-2 relative">
+                                                            <ResponsiveContainer width="100%" height="100%">
+                                                                <AreaChart data={card.tailStats.paretoPoints}>
+                                                                    <defs>
+                                                                        <linearGradient id="colorTail" x1="0" y1="0" x2="0" y2="1">
+                                                                            <stop offset="5%" stopColor="#f43f5e" stopOpacity={0.3} />
+                                                                            <stop offset="95%" stopColor="#f43f5e" stopOpacity={0} />
+                                                                        </linearGradient>
+                                                                    </defs>
+                                                                    <CartesianGrid strokeDasharray="3 3" stroke="#18181b" vertical={false} />
+                                                                    <Tooltip
+                                                                        contentStyle={{ backgroundColor: '#09090b', border: '1px solid #18181b', borderRadius: '12px' }}
+                                                                        itemStyle={{ fontSize: '10px' }}
+                                                                        labelStyle={{ display: 'none' }}
+                                                                        formatter={(val: any) => [`${parseFloat(String(val)).toFixed(1)}%`, 'Cum. Spend']}
+                                                                    />
+                                                                    <ReferenceLine x={Math.floor(card.tailStats.paretoPoints.length * 0.2)} stroke="#52525b" strokeDasharray="3 3" label={{ position: 'top', value: '20% Suppliers', fill: '#71717a', fontSize: 10 }} />
+                                                                    <ReferenceLine y={80} stroke="#f43f5e" strokeDasharray="3 3" label={{ position: 'right', value: '80% Spend', fill: '#f43f5e', fontSize: 10 }} />
+                                                                    <Area
+                                                                        type="monotone"
+                                                                        dataKey="cumPercent"
+                                                                        stroke="#f43f5e"
+                                                                        fillOpacity={1}
+                                                                        fill="url(#colorTail)"
+                                                                        strokeWidth={2}
+                                                                        isAnimationActive={true}
+                                                                    />
+                                                                </AreaChart>
+                                                            </ResponsiveContainer>
+                                                            <div className="absolute inset-x-0 -bottom-2 flex justify-between px-2 text-[8px] font-black uppercase tracking-widest text-zinc-600">
+                                                                <span>Head Suppliers</span>
+                                                                <span>Tail End</span>
+                                                            </div>
+                                                        </div>
+                                                    )}
                                                     {(expandedCards.has(card.id) && Array.isArray(card.data) ? card.data.slice(0, 50) : card.topDistribution || []).map((item: any, i: number) => (
                                                         <div key={i} className="flex items-center justify-between text-[11px]">
                                                             <span className="text-zinc-500 truncate max-w-[120px]">{item.name}</span>
@@ -1229,8 +1481,13 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                                 <tr key={i} className="border-b border-zinc-900 hover:bg-zinc-800/20 transition-colors group">
                                                     <td className="p-6 font-bold text-sm text-white">{s.masterName}</td>
                                                     <td className="p-6">
-                                                        <span className="px-3 py-1 bg-zinc-950 border border-zinc-800 rounded-full text-[10px] font-bold text-zinc-400">
-                                                            Verified Partner
+                                                        <span className={cn(
+                                                            "px-3 py-1 border rounded-full text-[10px] font-bold",
+                                                            s.contractStatus === 'Contracted'
+                                                                ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-500"
+                                                                : "bg-zinc-950 border-zinc-800 text-zinc-500"
+                                                        )}>
+                                                            {s.contractStatus === 'Contracted' ? 'Contracted' : 'Unverified'}
                                                         </span>
                                                     </td>
                                                     <td className="p-6 text-sm text-zinc-500 font-medium">{s.variants?.length || 0} Records Merged</td>
@@ -1265,6 +1522,14 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                             >
                                 <div className="flex justify-between items-center bg-zinc-900/40 p-6 rounded-[2rem] border border-zinc-900">
                                     <div>
+                                        {isAdmin && (
+                                            <div className="flex items-center gap-2 mb-2">
+                                                <span className="bg-emerald-500/10 text-emerald-500 text-[10px] font-black px-2 py-0.5 rounded-full border border-emerald-500/20 uppercase tracking-widest flex items-center gap-1">
+                                                    <ShieldCheck className="w-3 h-3" /> Admin View Active
+                                                </span>
+                                                <span className="text-zinc-500 text-[10px] font-bold uppercase tracking-widest">• Total Identified Opportunity: {formatCurrency(dynamicStats.identifiedSavings)}</span>
+                                            </div>
+                                        )}
                                         <h3 className="text-2xl font-bold text-white">Savings & ROI Analysis</h3>
                                         <p className="text-zinc-500 text-sm">Actionable opportunities to reduce spend</p>
                                     </div>
@@ -1278,26 +1543,132 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                 </div>
 
                                 <div className="grid grid-cols-1 md:grid-cols-3 gap-6 relative group/grid">
-                                    <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none group-hover/grid:hidden">
-                                        <div className="bg-black/80 backdrop-blur-sm px-6 py-3 rounded-2xl border border-primary/30 flex items-center gap-3">
-                                            <MoreHorizontal className="w-5 h-5 text-primary" />
-                                            <span className="text-[10px] font-black uppercase tracking-widest text-primary">Strategic Analysis Locked</span>
+                                    {(!isAdmin) && (
+                                        <div className="absolute inset-0 z-10 flex flex-col items-center justify-center pointer-events-none gap-6">
+                                            <div className="bg-black/90 backdrop-blur-md px-8 py-4 rounded-2xl border border-primary/30 flex items-center gap-3 shadow-2xl">
+                                                <Lock className="w-5 h-5 text-primary" />
+                                                <span className="text-xs font-black uppercase tracking-widest text-primary">Strategic Analysis Locked</span>
+                                            </div>
+                                            <div className="flex flex-col items-center gap-2 pointer-events-auto">
+                                                <p className="text-zinc-400 text-[10px] font-bold uppercase tracking-widest">Unlock your complete savings roadmap — speak with an Enalsys expert.</p>
+                                                <a
+                                                    href="https://cal.id/hello-enalsys"
+                                                    target="_blank"
+                                                    rel="noopener noreferrer"
+                                                    className="bg-primary hover:bg-teal-600 text-white px-8 py-4 rounded-2xl font-black text-xs uppercase tracking-widest shadow-2xl transition-all active:scale-95 flex items-center gap-2"
+                                                >
+                                                    <Calendar className="w-4 h-4" />
+                                                    Book a Call with Enalsys
+                                                </a>
+                                            </div>
                                         </div>
-                                    </div>
-                                    <div className="bg-primary/5 border border-primary/20 rounded-3xl p-8 border-b-4 border-b-primary blur-md pointer-events-none select-none">
+                                    )}
+                                    <div className={cn(
+                                        "bg-primary/5 border border-primary/20 rounded-3xl p-8 border-b-4 border-b-primary transition-all",
+                                        !isAdmin && "blur-xl pointer-events-none select-none opacity-50"
+                                    )}>
                                         <span className="text-[10px] font-black text-primary uppercase tracking-widest mb-4 block">Total Potential ROI</span>
                                         <div className="text-4xl font-black text-white mb-2">{formatCurrency(dynamicStats.identifiedSavings)}</div>
-                                        <p className="text-xs text-zinc-500">Based on variant consolidation & price variance analysis</p>
+                                        <p className="text-xs text-zinc-500">Based on variant consolidation & category benchmarks</p>
                                     </div>
-                                    <div className="bg-emerald-500/5 border border-emerald-500/20 rounded-3xl p-8 border-b-4 border-b-emerald-500 blur-md pointer-events-none select-none">
+                                    <div className={cn(
+                                        "bg-emerald-500/5 border border-emerald-500/20 rounded-3xl p-8 border-b-4 border-b-emerald-500 transition-all",
+                                        !isAdmin && "blur-xl pointer-events-none select-none opacity-50"
+                                    )}>
                                         <span className="text-[10px] font-black text-emerald-500 uppercase tracking-widest mb-4 block">Quick-Win Savings</span>
                                         <div className="text-4xl font-black text-white mb-2">{formatCurrency(dynamicStats.identifiedSavings * 0.3)}</div>
                                         <p className="text-xs text-zinc-500">Immediate opportunities through duplicate vendor removal</p>
                                     </div>
-                                    <div className="bg-amber-500/5 border border-amber-500/20 rounded-3xl p-8 border-b-4 border-b-amber-500 blur-md pointer-events-none select-none">
+                                    <div className={cn(
+                                        "bg-amber-500/5 border border-amber-500/20 rounded-3xl p-8 border-b-4 border-b-amber-500 transition-all",
+                                        !isAdmin && "blur-xl pointer-events-none select-none opacity-50"
+                                    )}>
                                         <span className="text-[10px] font-black text-amber-500 uppercase tracking-widest mb-4 block">Strategic Pipeline</span>
                                         <div className="text-4xl font-black text-white mb-2">{formatCurrency(dynamicStats.identifiedSavings * 0.7)}</div>
                                         <p className="text-xs text-zinc-500">Medium-term savings via contract consolidation</p>
+                                    </div>
+                                </div>
+
+                                <div className="space-y-6">
+                                    <div className="flex items-center justify-between">
+                                        <h4 className="text-lg font-bold text-white uppercase tracking-tighter">Top 3 Savings Opportunities</h4>
+                                        <span className="text-zinc-500 text-[10px] font-bold uppercase tracking-widest">Ranked by absolute INR value</span>
+                                    </div>
+
+                                    <div className="grid grid-cols-1 gap-4">
+                                        {dynamicStats.opportunityRanking.map((opp, idx) => (
+                                            <div
+                                                key={opp.id}
+                                                className={cn(
+                                                    "bg-zinc-900/40 border border-zinc-800 rounded-[2rem] p-6 transition-all relative overflow-hidden group/opp",
+                                                    !isAdmin && "blur-md pointer-events-none select-none opacity-40"
+                                                )}
+                                            >
+                                                <div className="flex items-center justify-between mb-4">
+                                                    <div className="flex items-center gap-4">
+                                                        <div className="w-10 h-10 rounded-xl bg-zinc-950 border border-zinc-800 flex items-center justify-center text-xs font-black text-zinc-500">
+                                                            0{idx + 1}
+                                                        </div>
+                                                        <div>
+                                                            <h5 className="text-white font-bold">{opp.label}</h5>
+                                                            <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest">{opp.recommendation}</p>
+                                                        </div>
+                                                    </div>
+                                                    <div className="text-right">
+                                                        <div className="text-xl font-black text-primary">{formatCurrency(opp.value)}</div>
+                                                        <div className="text-[10px] font-bold text-emerald-500">{opp.percent.toFixed(1)}% Saving</div>
+                                                    </div>
+                                                </div>
+
+                                                {/* Expanded Details - Always unlocked for admin */}
+                                                <div className="mt-6 pt-6 border-t border-zinc-800/50 space-y-6">
+                                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                                                        <div>
+                                                            <h6 className="text-[10px] font-black text-zinc-500 uppercase tracking-widest mb-3">Top Impact Categories</h6>
+                                                            <div className="flex flex-wrap gap-2">
+                                                                {opp.categories.map(c => (
+                                                                    <span key={c} className="bg-zinc-950 border border-zinc-800 text-zinc-400 px-3 py-1 rounded-full text-[10px] font-bold">
+                                                                        {c}
+                                                                    </span>
+                                                                ))}
+                                                            </div>
+
+                                                            <div className="mt-6">
+                                                                <h6 className="text-[10px] font-black text-zinc-500 uppercase tracking-widest mb-3">Calculation Logic</h6>
+                                                                <div className="bg-zinc-950/50 border border-zinc-800/50 p-3 rounded-xl text-[10px] font-mono text-zinc-400">
+                                                                    {opp.calculation}
+                                                                </div>
+                                                            </div>
+                                                        </div>
+
+                                                        <div>
+                                                            <h6 className="text-[10px] font-black text-zinc-500 uppercase tracking-widest mb-3">Current Vendor Concentration</h6>
+                                                            <div className="space-y-3">
+                                                                {opp.topVendors.map(v => (
+                                                                    <div key={v.name} className="flex justify-between items-center text-[10px]">
+                                                                        <span className="text-zinc-400 font-bold max-w-[150px] truncate">{v.name}</span>
+                                                                        <span className="text-zinc-500">{formatCurrency(v.spend)}</span>
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+
+                                                            <div className="mt-6 p-4 bg-primary/5 border border-primary/20 rounded-2xl">
+                                                                <div className="flex justify-between items-end">
+                                                                    <div>
+                                                                        <span className="text-[9px] font-black text-primary uppercase block mb-1">Projected Outcome</span>
+                                                                        <div className="text-white font-black">{formatCurrency(opp.projectedSpend)}</div>
+                                                                    </div>
+                                                                    <div className="text-right">
+                                                                        <span className="text-[9px] font-black text-emerald-500 uppercase block mb-1">Target Saving</span>
+                                                                        <div className="text-emerald-500 font-black">-{formatCurrency(opp.value)}</div>
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        ))}
                                     </div>
                                 </div>
 
@@ -1462,8 +1833,8 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                             onClose={() => setDrilldownKpi(null)}
                             data={drilldownKpi.data}
                             title={drilldownKpi.label}
-                            label={drilldownKpi.label.replace('Spend by ', '')}
-                            color={drilldownKpi.color === 'rose' ? 'rose' : 'primary'}
+                            label={drilldownKpi.summaryLabel || drilldownKpi.label.replace('Spend by ', '')}
+                            color={drilldownKpi.color === 'rose' ? 'rose' : drilldownKpi.color === 'amber' ? 'amber' : 'primary'}
                         />
                     )
                 }

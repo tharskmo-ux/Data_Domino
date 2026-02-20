@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { onAuthStateChanged, type User } from 'firebase/auth';
+import { onAuthStateChanged, sendPasswordResetEmail, type User } from 'firebase/auth';
 import { auth, IS_DEMO_MODE } from '../../lib/firebase';
 
 export type UserRole = 'admin' | 'enterprise' | 'trial' | 'none';
@@ -12,6 +12,7 @@ interface AuthContextType {
     isAdmin: boolean;
     isEnterprise: boolean;
     isTrial: boolean;
+    forgotPassword: (email: string) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType>({
@@ -21,7 +22,8 @@ const AuthContext = createContext<AuthContextType>({
     role: 'none',
     isAdmin: false,
     isEnterprise: false,
-    isTrial: false
+    isTrial: false,
+    forgotPassword: async () => { }
 });
 
 export const useAuth = () => useContext(AuthContext);
@@ -74,6 +76,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return unsubscribe;
     }, []);
 
+    const forgotPassword = async (email: string) => {
+        if (IS_DEMO_MODE) {
+            // Mock delay
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            console.log('Demo Mode: Password reset email sent to', email);
+            return;
+        }
+        await sendPasswordResetEmail(auth, email);
+    };
+
     return (
         <AuthContext.Provider value={{
             user,
@@ -82,7 +94,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             role,
             isAdmin: role === 'admin',
             isEnterprise: role === 'enterprise',
-            isTrial: role === 'trial'
+            isTrial: role === 'trial',
+            forgotPassword
         }}>
             {children}
         </AuthContext.Provider>

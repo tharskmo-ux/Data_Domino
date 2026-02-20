@@ -12,6 +12,16 @@ interface SupplierGroup {
     totalSpend: number;
     transactionCount: number;
     status: 'pending' | 'approved' | 'rejected';
+    contractStatus: 'Contracted' | 'Unverified';
+}
+
+interface DuplicateAlert {
+    id: string;
+    invoiceNo: string;
+    vendorName: string;
+    date: string;
+    amount: number;
+    type: 'Same Invoice Number' | 'Potential Match (Vendor+Amount+Date)';
 }
 
 interface SupplierMatchingProps {
@@ -43,11 +53,16 @@ const SupplierMatching: React.FC<SupplierMatchingProps> = ({ onComplete, data, m
                     score: 100,
                     totalSpend: 0,
                     transactionCount: 0,
-                    status: 'pending'
+                    status: 'pending',
+                    contractStatus: row['Contract_Status'] || 'Unverified'
                 };
             } else {
                 if (!clusters[normalizedName].variants.includes(rawName)) {
                     clusters[normalizedName].variants.push(rawName);
+                }
+                // If any record in the cluster is contracted, the whole cluster is considered contracted
+                if (row['Contract_Status'] === 'Contracted') {
+                    clusters[normalizedName].contractStatus = 'Contracted';
                 }
             }
 
@@ -66,6 +81,8 @@ const SupplierMatching: React.FC<SupplierMatchingProps> = ({ onComplete, data, m
         return Object.values(clusters).sort((a, b) => b.totalSpend - a.totalSpend);
     });
     const [searchQuery, setSearchQuery] = useState('');
+    const [duplicateAlerts, setDuplicateAlerts] = useState<DuplicateAlert[]>([]);
+    const [activeView, setActiveView] = useState<'clusters' | 'duplicates'>('clusters');
     const [selectedGroupId, setSelectedGroupId] = useState<string | null>(groups[0]?.id || null);
 
     const selectedGroup = groups.find(g => g.id === selectedGroupId);
@@ -110,7 +127,8 @@ const SupplierMatching: React.FC<SupplierMatchingProps> = ({ onComplete, data, m
                 score: 100,
                 totalSpend: variantSpend,
                 transactionCount: variantTxns,
-                status: 'pending'
+                status: 'pending',
+                contractStatus: sourceGroup.contractStatus // Inherit contract status on split
             };
 
             return [newGroup, ...updatedGroups];
@@ -160,28 +178,79 @@ const SupplierMatching: React.FC<SupplierMatchingProps> = ({ onComplete, data, m
                 <div className="flex gap-3">
                     <button
                         onClick={() => {
-                            // Aggressive Dedupe Simulation
-                            alert('Scanning for probabilistic duplicates... 5 additional clusters identified for review.');
-                            setGroups(prev => {
-                                // Simulate merging two clusters
-                                if (prev.length < 2) return prev;
-                                const first = prev[0];
-                                const second = prev[prev.length - 1];
-                                const merged = {
-                                    ...first,
-                                    masterName: `${first.masterName} (Merged)`,
-                                    variants: [...first.variants, ...second.variants],
-                                    totalSpend: first.totalSpend + second.totalSpend,
-                                    transactionCount: first.transactionCount + second.transactionCount,
-                                    confidence: 'Low' as const,
-                                    score: 45
-                                };
-                                return [merged, ...prev.slice(1, prev.length - 1)];
+                            const invoiceCol = mappings['invoice_number'];
+                            const supplierCol = mappings['supplier'];
+                            const amountCol = mappings['amount'];
+                            const dateCol = mappings['date'];
+
+                            if (!data || data.length === 0) return;
+
+                            const alerts: DuplicateAlert[] = [];
+                            const invoiceMap: Record<string, any[]> = {};
+                            const comboMap: Record<string, any[]> = {};
+
+                            data.forEach((row, idx) => {
+                                const inv = String(row[invoiceCol] || '').trim();
+                                const sup = String(row[supplierCol] || '').trim();
+                                const amt = Number(row[amountCol]) || 0;
+                                const dt = String(row[dateCol] || '').trim();
+
+                                if (inv && inv !== 'N/A' && inv !== '-') {
+                                    if (!invoiceMap[inv]) invoiceMap[inv] = [];
+                                    invoiceMap[inv].push({ ...row, _idx: idx });
+                                }
+
+                                const combo = `${sup}|${amt}|${dt}`;
+                                if (!comboMap[combo]) comboMap[combo] = [];
+                                comboMap[combo].push({ ...row, _idx: idx });
                             });
+
+                            // Check invoice duplicates
+                            Object.keys(invoiceMap).forEach(inv => {
+                                if (invoiceMap[inv].length > 1) {
+                                    invoiceMap[inv].forEach(row => {
+                                        alerts.push({
+                                            id: `dup-inv-${inv}-${row._idx}`,
+                                            invoiceNo: inv,
+                                            vendorName: row[supplierCol],
+                                            date: row[dateCol],
+                                            amount: row[amountCol],
+                                            type: 'Same Invoice Number'
+                                        });
+                                    });
+                                }
+                            });
+
+                            // Check combo duplicates
+                            Object.keys(comboMap).forEach(combo => {
+                                if (comboMap[combo].length > 1) {
+                                    comboMap[combo].forEach(row => {
+                                        const alreadyFlagged = alerts.some(a => a.invoiceNo === row[invoiceCol] && a.type === 'Same Invoice Number');
+                                        if (!alreadyFlagged) {
+                                            alerts.push({
+                                                id: `dup-combo-${combo}-${row._idx}`,
+                                                invoiceNo: row[invoiceCol] || 'N/A',
+                                                vendorName: row[supplierCol],
+                                                date: row[dateCol],
+                                                amount: row[amountCol],
+                                                type: 'Potential Match (Vendor+Amount+Date)'
+                                            });
+                                        }
+                                    });
+                                }
+                            });
+
+                            setDuplicateAlerts(alerts);
+                            setActiveView('duplicates');
+                            if (alerts.length > 0) {
+                                alert(`Dedupe complete: Identified ${alerts.length} potential duplicate records.`);
+                            } else {
+                                alert('Dedupe complete: No duplicates identified.');
+                            }
                         }}
                         className="px-6 py-3 bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-white rounded-2xl font-bold flex items-center justify-center gap-2 transition-all"
                     >
-                        <Zap className="h-4 w-4 text-amber-500" /> Run Smart Dedupe
+                        <Zap className="h-4 w-4 text-amber-500" /> Run Invoice Dedupe
                     </button>
                     <button
                         onClick={() => onComplete(groups)}
@@ -401,6 +470,64 @@ const SupplierMatching: React.FC<SupplierMatchingProps> = ({ onComplete, data, m
                     </AnimatePresence>
                 </div>
             </div>
+            {duplicateAlerts.length > 0 && activeView === 'duplicates' && (
+                <motion.div
+                    initial={{ opacity: 0, scale: 0.98 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    className="bg-zinc-900 border border-zinc-800 rounded-3xl overflow-hidden shadow-2xl"
+                >
+                    <div className="p-6 border-b border-zinc-800 bg-rose-500/10 flex justify-between items-center">
+                        <div className="flex items-center gap-3">
+                            <div className="p-2 bg-rose-500 rounded-xl">
+                                <AlertTriangle className="h-5 w-5 text-white" />
+                            </div>
+                            <div>
+                                <h3 className="text-xl font-bold text-white">Duplicate Invoice Alerts</h3>
+                                <p className="text-xs text-rose-500/70 font-bold uppercase tracking-widest">Action Required: Verify potential double-payments</p>
+                            </div>
+                        </div>
+                        <button
+                            onClick={() => setActiveView('clusters')}
+                            className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-white rounded-xl text-xs font-bold transition-all"
+                        >
+                            Return to Matching
+                        </button>
+                    </div>
+                    <div className="overflow-x-auto">
+                        <table className="w-full text-left border-collapse">
+                            <thead>
+                                <tr className="bg-zinc-950/50 border-b border-zinc-800">
+                                    <th className="p-4 text-[10px] font-black text-zinc-500 uppercase tracking-widest">Invoice_No</th>
+                                    <th className="p-4 text-[10px] font-black text-zinc-500 uppercase tracking-widest">Vendor_Name</th>
+                                    <th className="p-4 text-[10px] font-black text-zinc-500 uppercase tracking-widest">Date</th>
+                                    <th className="p-4 text-[10px] font-black text-zinc-500 uppercase tracking-widest">Amount</th>
+                                    <th className="p-4 text-[10px] font-black text-zinc-500 uppercase tracking-widest">Duplicate_Type</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-zinc-800/50">
+                                {duplicateAlerts.map((alert) => (
+                                    <tr key={alert.id} className="hover:bg-zinc-800/30 transition-colors group">
+                                        <td className="p-4 text-sm font-mono text-zinc-300">{alert.invoiceNo}</td>
+                                        <td className="p-4 text-sm font-bold text-white">{alert.vendorName}</td>
+                                        <td className="p-4 text-sm text-zinc-400">{alert.date}</td>
+                                        <td className="p-4 text-sm font-bold text-primary font-mono">{formatCurrency(alert.amount)}</td>
+                                        <td className="p-4">
+                                            <span className={cn(
+                                                "text-[9px] px-2 py-1 rounded-lg font-black uppercase tracking-widest border",
+                                                alert.type === 'Same Invoice Number'
+                                                    ? "bg-rose-500/10 text-rose-500 border-rose-500/20"
+                                                    : "bg-amber-500/10 text-amber-500 border-amber-500/20"
+                                            )}>
+                                                {alert.type}
+                                            </span>
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </motion.div>
+            )}
         </motion.div>
     );
 };

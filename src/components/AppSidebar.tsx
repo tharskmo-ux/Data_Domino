@@ -4,7 +4,7 @@ import { cn } from '../lib/utils';
 import { useAuth } from '../features/auth/AuthContext';
 import type { Project } from '../features/projects/ProjectContext';
 
-export type ETLStep = 'dashboard' | 'mapping' | 'data-quality' | 'matching' | 'categorization' | 'history';
+export type ETLStep = 'dashboard' | 'header-selection' | 'mapping' | 'data-quality' | 'matching' | 'categorization' | 'history';
 
 interface AppSidebarProps {
     activeStep: ETLStep;
@@ -26,6 +26,12 @@ const AppSidebar: React.FC<AppSidebarProps> = ({ activeStep, onNavigate, current
             label: 'Dashboard',
             icon: BarChart3,
             description: isGlobal ? 'Global Overview & Projects' : 'Project Overview & Upload'
+        },
+        {
+            id: 'header-selection',
+            label: 'Header Discovery',
+            icon: History, // Re-using History or importing Search
+            description: isGlobal ? 'Header Detection Rules' : 'Identify correct header row'
         },
         {
             id: 'mapping',
@@ -94,6 +100,7 @@ const AppSidebar: React.FC<AppSidebarProps> = ({ activeStep, onNavigate, current
 
                         // Check explicit activity history
                         const hasActivity = currentProject.activities.some(a => {
+                            if (step.id === 'header-selection') return a.type === 'header-selection' || a.type === 'mapping';
                             if (step.id === 'mapping') return a.type === 'mapping';
                             if (step.id === 'matching') return a.type === 'matching';
                             if (step.id === 'categorization') return a.type === 'categorization';

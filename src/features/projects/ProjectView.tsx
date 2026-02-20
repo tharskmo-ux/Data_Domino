@@ -1,7 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { Database, ChevronRight, FileCheck2 } from 'lucide-react';
 import { useProjects } from './ProjectContext';
-import ProjectSettingsModal from './ProjectSettingsModal'; // Import Modal
+import ProjectSettingsModal from './ProjectSettingsModal';
 import FileUpload from '../etl/FileUpload';
 import type { FileMetadata } from '../etl/FileUpload';
 import ColumnMapper from '../etl/ColumnMapper';
@@ -16,6 +16,9 @@ import ActivityHistory from '../etl/ActivityHistory';
 import { useSubscription } from '../subscription/SubscriptionContext';
 import { Lock, FileDown, AlertCircle } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';
+import HeaderRowSelector from '../etl/HeaderRowSelector';
+import * as XLSX from 'xlsx';
+import { normalizeWorksheet, stitchTransactions, normalizeDataKeys, cleanValue, filterNoise, detectCurrency, EXCHANGE_RATES } from '../../lib/dataExtraction';
 
 const ExportButton = () => {
     const { checkAccess } = useSubscription();
@@ -40,15 +43,14 @@ const ExportButton = () => {
 
 const ProjectView: React.FC = () => {
     const { role } = useAuth();
-    const { currentProject, setCurrentProject, updateProject, deleteProject, addActivity, updateProjectCache, projectDataCache } = useProjects();
+    const { currentProject, setCurrentProject, updateProject, deleteProject, addActivity, updateProjectCache } = useProjects();
     const [activeStep, setActiveStep] = useState<ETLStep>('dashboard');
 
     const hasAlreadyUploaded = currentProject?.activities.some(a => a.type === 'upload');
     const isUploadDisabled = role === 'trial' && hasAlreadyUploaded;
     const [isProcessing, setIsProcessing] = useState(false);
-    const [isSettingsOpen, setIsSettingsOpen] = useState(false); // Modal State
+    const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
-    // Core ETL Data State
     const [projectData, setProjectData] = useState<{
         raw: any[];
         headers: string[];
@@ -56,6 +58,15 @@ const ProjectView: React.FC = () => {
         currency: string;
         clusters: any[];
         fileMeta?: FileMetadata;
+        rawSheetData?: any[][];
+        merges?: any[];
+        worksheet?: any;
+        normalizationSummary?: {
+            currenciesDetected: string[];
+            rowsConverted: number;
+            assumptionsMade: boolean;
+            totalRows: number;
+        };
     }>({
         raw: [],
         headers: [],
@@ -65,116 +76,28 @@ const ProjectView: React.FC = () => {
         fileMeta: undefined
     });
 
-    // Initialize state from existing project
-    useEffect(() => {
-        if (currentProject) {
-            // Restore active step based on status
-            if (currentProject.status === 'completed') {
-                setActiveStep('dashboard');
-            } else if (currentProject.status === 'draft') {
-                setActiveStep('dashboard'); // Default to start (Upload view) if draft
-            }
+    // ... (existing code)
 
-            // Restore Currency
-            if (currentProject.currency && currentProject.currency !== projectData.currency) {
-                setProjectData(prev => ({ ...prev, currency: currentProject.currency! }));
-            }
-
-            // Restore from Session Cache
-            if (projectDataCache[currentProject.id]) {
-                const cached = projectDataCache[currentProject.id];
-                setProjectData(prev => ({ ...prev, ...cached }));
-                // If we have data, ensure we are not stuck on upload
-                if (cached.raw && cached.raw.length > 0 && activeStep === 'dashboard' && currentProject.status === 'draft') {
-                    // Logic allows dashboard, so we are good.
-                }
-            } else {
-                // No cache found (New Project or Refresh) - Explicitly reset data to prevent checking previous state
-                setProjectData({
-                    raw: [],
-                    headers: [],
-                    mappings: {},
-                    currency: currentProject.currency || 'INR',
-                    clusters: [],
-                    fileMeta: undefined
-                });
-
-                // Reset to upload view for drafts
-                if (currentProject.status === 'draft') {
-                    setActiveStep('dashboard');
-                }
-            }
-
-            // In a real app, we would re-hydrate the projectData from the backend here.
-            // Since we don't have a backend, we rely on the in-memory state if available,
-            // or the user has to re-upload. This is a known limitation of this prototype.
-            // However, we can at least show the dashboard if stats are present.
-            if (currentProject.status === 'completed' && currentProject.stats) {
-                // Mock re-hydration for demo purposes if raw data is missing but stats exist
-                // (Ideally, we'd fetch raw data from IDB or API)
-            }
-        }
-    }, [currentProject?.id]);
-
-    if (!currentProject) return null;
-
-    const handleUploadComplete = (data: any[], metadata: FileMetadata) => {
+    const handleUploadComplete = (data: any[], metadata: FileMetadata, rawSheetData: any[][], merges: any[], worksheet: any) => {
         console.log('Ingestion complete. Rows:', data.length);
         setIsProcessing(true);
 
-        const headers = data.length > 0 ? Object.keys(data[0]) : [];
-
-        // Intelligent Auto-mapping logic (moved from ColumnMapper to initialize faster)
-        const initialMappings: Record<string, string> = {};
-        headers.forEach(header => {
-            const h = header.toLowerCase().replace(/[^a-z0-9]/g, '');
-
-            if (h.includes('date')) initialMappings['date'] = header;
-            if (h.includes('amount') || h.includes('val') || h.includes('sum')) initialMappings['amount'] = header;
-            if (h.includes('vendor') || h.includes('supplier') || h.includes('name')) initialMappings['supplier'] = header;
-            if (h.includes('currency') || h.includes('curr')) initialMappings['currency'] = header;
-            // Multi-level category detection
-            if (h.includes('l1') || h.includes('segment') || (h.includes('cat') && !h.includes('sub'))) initialMappings['category_l1'] = header;
-            if (h.includes('l2') || h.includes('family') || h.includes('sub')) initialMappings['category_l2'] = header;
-            if (h.includes('l3') || h.includes('class') || h.includes('commodity')) initialMappings['category_l3'] = header;
-
-            // Fallback for simple 'category' to L1
-            if (!initialMappings['category_l1'] && (h.includes('cat') || h.includes('dept'))) initialMappings['category_l1'] = header;
-
-            if (h.includes('po') || h.includes('order')) initialMappings['po_number'] = header;
-            if (h.includes('plant') || h.includes('facility')) initialMappings['plant'] = header;
-            if (h.includes('loc')) initialMappings['location'] = header;
-            if (h.includes('item') || h.includes('desc') || h.includes('sku') || h.includes('part')) initialMappings['item_description'] = header;
-            if (h.includes('contract') || h.includes('agreement')) initialMappings['contract_ref'] = header;
-            if (h.includes('qty') || h.includes('quantity') || h.includes('units') || h.includes('count')) initialMappings['quantity'] = header;
-            if (h.includes('price') || h.includes('rate') || (h.includes('unit') && (h.includes('cost') || h.includes('price')))) initialMappings['unit_price'] = header;
-        });
-
-        console.log('Auto-mappings generated:', initialMappings);
-
-        const newData = {
-            raw: data,
-            headers,
-            mappings: initialMappings,
-            fileMeta: metadata
-        };
-
         setProjectData(prev => ({
             ...prev,
-            ...newData
+            raw: data,
+            fileMeta: metadata,
+            rawSheetData,
+            merges,
+            worksheet
         }));
 
-        if (currentProject) updateProjectCache(currentProject.id, newData);
-
         // Keep isProcessing as true to show the loading overlay
-        // and immediately set activeStep to 'mapping' so that when isProcessing becomes false,
-        // it renders the ColumnMapper, not the AnalyticsDashboard.
-        setActiveStep('mapping');
+        setActiveStep('header-selection');
 
         // Simulate ETL Engine Background Processing
         setTimeout(() => {
             setIsProcessing(false);
-            setActiveStep('mapping'); // User Request: Upload -> Mapping
+            setActiveStep('header-selection');
 
             if (currentProject) {
                 updateProject(currentProject.id, {
@@ -190,11 +113,161 @@ const ProjectView: React.FC = () => {
                 addActivity(currentProject.id, {
                     type: 'upload',
                     label: 'Advanced Data Ingestion Complete',
-                    details: `Successfully ingested ${data.length} records with ${headers.length} columns.`,
-                    metadata: { rowCount: data.length, colCount: headers.length }
+                    details: `Successfully ingested ${data.length} records. Analyzing structures...`,
                 });
             }
-        }, 2000);
+        }, 1500);
+    };
+
+    const handleHeaderRowSelection = (rowIndex: number) => {
+        if (!projectData.rawSheetData || !projectData.worksheet) return;
+
+        setIsProcessing(true);
+
+        const originalHeaders = projectData.rawSheetData[rowIndex].map((h: any) => String(h || '').trim());
+        const cleanHeaders = originalHeaders.map(h => h.replace(/\s+/g, ' '));
+
+        // Intelligent Auto-mapping logic
+        const initialMappings: Record<string, string> = {};
+        cleanHeaders.forEach(header => {
+            const h = header.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+            if (h.includes('date')) initialMappings['date'] = header;
+            if (h.includes('amount') || h.includes('val') || h.includes('sum')) initialMappings['amount'] = header;
+            if (h.includes('vendor') || h.includes('supplier') || h.includes('name') || h.includes('party')) initialMappings['supplier'] = header;
+            if (h.includes('currency') || h.includes('curr')) initialMappings['currency'] = header;
+
+            // Advanced category/taxonomy detection
+            const isCat = h.includes('l1') || h.includes('segment') || h.includes('head') || h.includes('account') || (h.includes('cat') && !h.includes('sub'));
+            if (isCat && !initialMappings['category_l1']) initialMappings['category_l1'] = header;
+
+            if (h.includes('l2') || h.includes('family') || h.includes('sub')) initialMappings['category_l2'] = header;
+            if (h.includes('l3') || h.includes('class') || h.includes('commodity')) initialMappings['category_l3'] = header;
+
+            // Fallback for simple 'category' or 'dept'
+            if (!initialMappings['category_l1'] && (h.includes('cat') || h.includes('dept') || h.includes('cost'))) initialMappings['category_l1'] = header;
+
+            if (h.includes('po') || h.includes('order')) initialMappings['po_number'] = header;
+            if (h.includes('invoice') || h.includes('bill')) initialMappings['invoice_number'] = header;
+            if (h.includes('plant') || h.includes('facility')) initialMappings['plant'] = header;
+            if (h.includes('loc')) initialMappings['location'] = header;
+            if (h.includes('item') || h.includes('desc') || h.includes('sku') || h.includes('part')) initialMappings['item_description'] = header;
+            if (h.includes('contract') || h.includes('agreement')) initialMappings['contract_ref'] = header;
+            if (h.includes('qty') || h.includes('quantity') || h.includes('units') || h.includes('count')) initialMappings['quantity'] = header;
+            if (h.includes('price') || h.includes('rate') || (h.includes('unit') && (h.includes('cost') || h.includes('price')))) initialMappings['unit_price'] = header;
+            if (h.includes('term') || h.includes('pay')) initialMappings['payment_terms'] = header;
+        });
+
+        // Use normalization for the worksheet before parsing
+        const normalizedWS = normalizeWorksheet(projectData.worksheet);
+
+        // Re-parse the sheet with the correct header row
+        let data = XLSX.utils.sheet_to_json(normalizedWS, { range: rowIndex });
+
+        // NORMALIZE KEYS (Trim and sanitize headers/keys to ensure 100% match)
+        data = normalizeDataKeys(data);
+
+        // IDENTIFY MARKERS (To prevent stitching into noisy/empty rows)
+        const markerColumns = cleanHeaders.filter(h => {
+            const lower = h.toLowerCase();
+            return lower.includes('desc') || lower.includes('item') || lower.includes('amount') || lower.includes('val');
+        });
+
+        // Apply transaction stitching for "sticky" context columns
+        const stickyColumns = cleanHeaders.filter(h => {
+            const lower = h.toLowerCase();
+            return lower.includes('vendor') || lower.includes('date') || lower.includes('bill') || lower.includes('invoice') || lower.includes('supplier') || lower.includes('party');
+        });
+
+        data = stitchTransactions(data, stickyColumns, markerColumns);
+
+        // FILTER NOISE (Remove subtotal rows, footers, etc.)
+        data = filterNoise(data);
+
+        // AGGRESSIVE DATA CLEANSING & CURRENCY NORMALIZATION
+        const amountCol = initialMappings['amount'];
+        const currencyCol = initialMappings['currency'];
+
+        let rowsConverted = 0;
+        let assumptionsMade = false;
+        const currenciesDetectedSet = new Set<string>();
+
+        data = (data as any[]).map(row => {
+            const cleaned: any = {};
+            Object.keys(row as object).forEach(key => {
+                cleaned[key] = cleanValue((row as any)[key]);
+            });
+
+            // 1. Detect Currency
+            let currCode = null;
+
+            // Step A: Check explicit currency column
+            if (currencyCol && row[currencyCol]) {
+                currCode = detectCurrency(row[currencyCol]);
+            }
+
+            // Step B: Check amount column for symbols
+            if (!currCode && amountCol && row[amountCol]) {
+                currCode = detectCurrency(row[amountCol]);
+            }
+
+            // Step C: Default to INR with assumption flag
+            if (!currCode) {
+                currCode = 'INR';
+                assumptionsMade = true;
+            } else {
+                rowsConverted++;
+            }
+
+            currenciesDetectedSet.add(currCode);
+
+            // 2. Convert to INR
+            const rate = EXCHANGE_RATES[currCode] || 1;
+            const amountVal = cleaned[amountCol] || 0;
+
+            cleaned['Net_Value_INR'] = amountVal * rate;
+
+            return cleaned;
+        });
+
+        const normalizationSummary = {
+            currenciesDetected: Array.from(currenciesDetectedSet),
+            rowsConverted,
+            assumptionsMade,
+            totalRows: data.length
+        };
+
+        // Add Net_Value_INR to headers if not already present
+        if (!cleanHeaders.includes('Net_Value_INR')) {
+            cleanHeaders.push('Net_Value_INR');
+        }
+
+        const newData = {
+            raw: data,
+            headers: cleanHeaders,
+            mappings: initialMappings,
+            normalizationSummary
+        };
+
+        setProjectData(prev => ({
+            ...prev,
+            ...newData
+        }));
+
+        if (currentProject) updateProjectCache(currentProject.id, newData);
+
+        setTimeout(() => {
+            setIsProcessing(false);
+            setActiveStep('mapping');
+
+            if (currentProject) {
+                addActivity(currentProject.id, {
+                    type: 'header-selection',
+                    label: 'Header Row Defined',
+                    details: `Used Row ${rowIndex + 1} as header. Identified ${cleanHeaders.length} columns.`,
+                });
+            }
+        }, 1000);
     };
 
 
@@ -324,6 +397,8 @@ const ProjectView: React.FC = () => {
         const uniqueSuppliers = new Set(updatedData.map(r => r[supplierCol])).size;
         const uniqueCategories = new Set(updatedData.map(r => r[categoryCol])).size;
 
+        if (!currentProject) return;
+
         updateProject(currentProject.id, {
             status: 'completed',
             stats: {
@@ -370,7 +445,7 @@ const ProjectView: React.FC = () => {
             <AppSidebar
                 activeStep={activeStep}
                 onNavigate={setActiveStep}
-                currentProject={currentProject}
+                currentProject={currentProject!}
                 onBack={() => setCurrentProject(null)}
                 onOpenSettings={() => setIsSettingsOpen(true)}
             />
@@ -378,7 +453,7 @@ const ProjectView: React.FC = () => {
             <ProjectSettingsModal
                 isOpen={isSettingsOpen}
                 onClose={() => setIsSettingsOpen(false)}
-                project={currentProject}
+                project={currentProject!}
                 onUpdate={(id, data) => updateProject(id, data)}
                 onDelete={(id) => {
                     deleteProject(id);
@@ -408,7 +483,7 @@ const ProjectView: React.FC = () => {
                         </button>
                         <button
                             onClick={() => {
-                                if (activeStep === 'dashboard' && projectData.fileMeta) setActiveStep('mapping');
+                                if (activeStep === 'dashboard' && projectData.fileMeta) setActiveStep('header-selection');
                                 else if (activeStep === 'mapping') handleMappingComplete(projectData.mappings, projectData.currency);
                                 else if (activeStep === 'matching') handleMatchingComplete(projectData.clusters);
                                 else if (activeStep === 'categorization') handleCategoryComplete(projectData.raw);
@@ -421,7 +496,6 @@ const ProjectView: React.FC = () => {
                             Run Step
                         </button>
 
-                        {/* Gated Export Button */}
                         <ExportButton />
                     </div>
                 </header>
@@ -431,7 +505,7 @@ const ProjectView: React.FC = () => {
                         "mx-auto transition-all duration-500",
                         activeStep === 'dashboard' || activeStep === 'categorization' ? "max-w-7xl" : "max-w-4xl"
                     )}>
-                        {activeStep === 'dashboard' && (
+                        {activeStep === 'dashboard' && currentProject && (
                             <>
                                 {(projectData.raw.length === 0 && currentProject.status !== 'completed') ? (
                                     <div className="space-y-10 animate-in fade-in slide-in-from-bottom-4 duration-500">
@@ -442,7 +516,7 @@ const ProjectView: React.FC = () => {
                                             </p>
                                         </div>
                                         <FileUpload
-                                            onUploadComplete={handleUploadComplete}
+                                            onUploadComplete={(data, metadata, raw, merges, ws) => handleUploadComplete(data, metadata, raw!, merges!, ws!)}
                                             disabled={isUploadDisabled}
                                         />
                                         {isUploadDisabled && (
@@ -483,6 +557,7 @@ const ProjectView: React.FC = () => {
                                 <DataProfiling
                                     data={projectData.raw}
                                     headers={projectData.headers}
+                                    normalizationSummary={projectData.normalizationSummary}
                                 />
 
                                 <div className="mt-12 flex justify-end">
@@ -504,6 +579,14 @@ const ProjectView: React.FC = () => {
                             />
                         )}
 
+                        {activeStep === 'header-selection' && projectData.rawSheetData && (
+                            <HeaderRowSelector
+                                rawData={projectData.rawSheetData}
+                                merges={projectData.merges}
+                                onSelect={handleHeaderRowSelection}
+                            />
+                        )}
+
                         {activeStep === 'matching' && (
                             <SupplierMatching
                                 onComplete={handleMatchingComplete}
@@ -521,7 +604,7 @@ const ProjectView: React.FC = () => {
                             />
                         )}
 
-                        {activeStep === 'history' && (
+                        {activeStep === 'history' && currentProject && (
                             <ActivityHistory
                                 activities={currentProject.activities || []}
                             />
@@ -529,7 +612,7 @@ const ProjectView: React.FC = () => {
                     </div>
                 </div>
             </main>
-        </div >
+        </div>
     );
 };
 

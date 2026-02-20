@@ -17,7 +17,7 @@ export interface FileMetadata {
 }
 
 interface FileUploadProps {
-    onUploadComplete: (data: any[], metadata: FileMetadata) => void;
+    onUploadComplete: (data: any[], metadata: FileMetadata, rawSheetData?: any[][], merges?: any[], worksheet?: any) => void;
     maxSizeMB?: number;
     disabled?: boolean;
 }
@@ -59,6 +59,9 @@ const FileUpload: React.FC<FileUploadProps> = ({ onUploadComplete, maxSizeMB = 1
                 const workbook = XLSX.read(data, { type: 'array' });
                 const firstSheetName = workbook.SheetNames[0];
                 const worksheet = workbook.Sheets[firstSheetName];
+
+                // Get raw data as array of arrays for header detection
+                const rawSheetData: any[][] = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
                 const jsonData: any[] = XLSX.utils.sheet_to_json(worksheet);
 
                 // Calculate Metadata
@@ -93,7 +96,8 @@ const FileUpload: React.FC<FileUploadProps> = ({ onUploadComplete, maxSizeMB = 1
                     );
 
                     if (updated.every(f => f.status === 'completed')) {
-                        onUploadComplete(jsonData, metadata);
+                        // Pass along raw worksheet and data for intelligent header selection
+                        (onUploadComplete as any)(jsonData, metadata, rawSheetData, worksheet['!merges'], worksheet);
                     }
                     return updated;
                 });

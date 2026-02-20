@@ -127,7 +127,8 @@ const SummaryDrilldown: React.FC<SummaryDrilldownProps> = ({
                                 "p-3 rounded-2xl",
                                 color === 'primary' ? "bg-primary/10 text-primary" :
                                     color === 'rose' ? "bg-rose-500/10 text-rose-500" :
-                                        "bg-emerald-500/10 text-emerald-500"
+                                        color === 'amber' ? "bg-amber-500/10 text-amber-500" :
+                                            "bg-emerald-500/10 text-emerald-500"
                             )}>
                                 <PieIcon className="h-6 w-6" />
                             </div>
@@ -147,7 +148,8 @@ const SummaryDrilldown: React.FC<SummaryDrilldownProps> = ({
                                     onChange={(e) => setSearchQuery(e.target.value)}
                                     className={cn(
                                         "w-full bg-zinc-900/50 border border-zinc-800 rounded-xl py-2 pl-10 pr-4 text-sm focus:outline-none focus:ring-2 transition-all text-white",
-                                        color === 'rose' ? "focus:ring-rose-500/50" : "focus:ring-primary/50"
+                                        color === 'rose' ? "focus:ring-rose-500/50" :
+                                            color === 'amber' ? "focus:ring-amber-500/50" : "focus:ring-primary/50"
                                     )}
                                 />
                             </div>
@@ -176,8 +178,8 @@ const SummaryDrilldown: React.FC<SummaryDrilldownProps> = ({
                                             <div className="flex items-center gap-2">
                                                 {label}
                                                 <div className="flex flex-col opacity-0 group-hover:opacity-100 transition-opacity">
-                                                    <ChevronUp className={cn("h-3 w-3 -mb-1", sortConfig.key === 'name' && sortConfig.direction === 'asc' ? (color === 'rose' ? "text-rose-500 opacity-100" : "text-primary opacity-100") : "opacity-30")} />
-                                                    <ChevronDown className={cn("h-3 w-3", sortConfig.key === 'name' && sortConfig.direction === 'desc' ? (color === 'rose' ? "text-rose-500 opacity-100" : "text-primary opacity-100") : "opacity-30")} />
+                                                    <ChevronUp className={cn("h-3 w-3 -mb-1", sortConfig.key === 'name' && sortConfig.direction === 'asc' ? (color === 'rose' ? "text-rose-500 opacity-100" : color === 'amber' ? "text-amber-500 opacity-100" : "text-primary opacity-100") : "opacity-30")} />
+                                                    <ChevronDown className={cn("h-3 w-3", sortConfig.key === 'name' && sortConfig.direction === 'desc' ? (color === 'rose' ? "text-rose-500 opacity-100" : color === 'amber' ? "text-amber-500 opacity-100" : "text-primary opacity-100") : "opacity-30")} />
                                                 </div>
                                             </div>
                                         </th>
@@ -185,8 +187,8 @@ const SummaryDrilldown: React.FC<SummaryDrilldownProps> = ({
                                             <div className="flex items-center gap-2">
                                                 Total Spend
                                                 <div className="flex flex-col opacity-0 group-hover:opacity-100 transition-opacity">
-                                                    <ChevronUp className={cn("h-3 w-3 -mb-1", sortConfig.key === 'value' && sortConfig.direction === 'asc' ? (color === 'rose' ? "text-rose-500 opacity-100" : "text-primary opacity-100") : "opacity-30")} />
-                                                    <ChevronDown className={cn("h-3 w-3", sortConfig.key === 'value' && sortConfig.direction === 'desc' ? (color === 'rose' ? "text-rose-500 opacity-100" : "text-primary opacity-100") : "opacity-30")} />
+                                                    <ChevronUp className={cn("h-3 w-3 -mb-1", sortConfig.key === 'value' && sortConfig.direction === 'asc' ? (color === 'rose' ? "text-rose-500 opacity-100" : color === 'amber' ? "text-amber-500 opacity-100" : "text-primary opacity-100") : "opacity-30")} />
+                                                    <ChevronDown className={cn("h-3 w-3", sortConfig.key === 'value' && sortConfig.direction === 'desc' ? (color === 'rose' ? "text-rose-500 opacity-100" : color === 'amber' ? "text-amber-500 opacity-100" : "text-primary opacity-100") : "opacity-30")} />
                                                 </div>
                                             </div>
                                         </th>
@@ -194,8 +196,8 @@ const SummaryDrilldown: React.FC<SummaryDrilldownProps> = ({
                                             <div className="flex items-center gap-2">
                                                 % Share
                                                 <div className="flex flex-col opacity-0 group-hover:opacity-100 transition-opacity">
-                                                    <ChevronUp className={cn("h-3 w-3 -mb-1", sortConfig.key === 'share' && sortConfig.direction === 'asc' ? (color === 'rose' ? "text-rose-500 opacity-100" : "text-primary opacity-100") : "opacity-30")} />
-                                                    <ChevronDown className={cn("h-3 w-3", sortConfig.key === 'share' && sortConfig.direction === 'desc' ? (color === 'rose' ? "text-rose-500 opacity-100" : "text-primary opacity-100") : "opacity-30")} />
+                                                    <ChevronUp className={cn("h-3 w-3 -mb-1", sortConfig.key === 'share' && sortConfig.direction === 'asc' ? (color === 'rose' ? "text-rose-500 opacity-100" : color === 'amber' ? "text-amber-500 opacity-100" : "text-primary opacity-100") : "opacity-30")} />
+                                                    <ChevronDown className={cn("h-3 w-3", sortConfig.key === 'share' && sortConfig.direction === 'desc' ? (color === 'rose' ? "text-rose-500 opacity-100" : color === 'amber' ? "text-amber-500 opacity-100" : "text-primary opacity-100") : "opacity-30")} />
                                                 </div>
                                             </div>
                                         </th>
@@ -209,7 +211,7 @@ const SummaryDrilldown: React.FC<SummaryDrilldownProps> = ({
                                             </td>
                                             <td className={cn(
                                                 "p-6 text-sm font-mono font-bold",
-                                                color === 'rose' ? "text-rose-500" : "text-primary"
+                                                color === 'rose' ? "text-rose-500" : color === 'amber' ? "text-amber-500" : "text-primary"
                                             )}>
                                                 {formatCurrency(row.value)}
                                             </td>
@@ -221,7 +223,7 @@ const SummaryDrilldown: React.FC<SummaryDrilldownProps> = ({
                                                             animate={{ width: `${row.share}%` }}
                                                             className={cn(
                                                                 "h-full shadow-[0_0_10px_rgba(20,184,166,0.3)]",
-                                                                color === 'rose' ? "bg-rose-500/60" : "bg-primary/60"
+                                                                color === 'rose' ? "bg-rose-500/60" : color === 'amber' ? "bg-amber-500/60" : "bg-primary/60"
                                                             )}
                                                         />
                                                     </div>

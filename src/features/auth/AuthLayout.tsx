@@ -1,4 +1,5 @@
 import React from 'react';
+import { IS_DEMO_MODE } from '../../lib/firebase';
 
 const AuthLayout: React.FC<{ children: React.ReactNode, title: string, subtitle: string }> = ({ children, title, subtitle }) => {
     return (
@@ -49,7 +50,7 @@ const AuthLayout: React.FC<{ children: React.ReactNode, title: string, subtitle:
                     <h2 className="text-3xl font-bold mb-2">{title}</h2>
                     <p className="text-zinc-500 mb-8">{subtitle}</p>
 
-                    {import.meta.env.DEV && (
+                    {import.meta.env.DEV && IS_DEMO_MODE && (
                         <div className="mb-6 p-4 bg-amber-500/10 border border-amber-500/20 rounded-xl flex items-start gap-3">
                             <div className="mt-0.5 text-amber-500">
                                 <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z" /><path d="M12 9v4" /><path d="M12 17h.01" /></svg>
