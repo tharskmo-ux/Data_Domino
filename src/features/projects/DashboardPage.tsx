@@ -13,11 +13,14 @@ import { motion } from 'framer-motion';
 import ActivityHistory from '../etl/ActivityHistory';
 import { useSubscription } from '../subscription/SubscriptionContext';
 import OrganizationNameModal from '../subscription/OrganizationNameModal';
+import { useAdminView } from '../admin/AdminViewContext';
+import ClientFilesPanel from '../admin/ClientFilesPanel';
 
 const DashboardPage = () => {
     const { user, isDemo, role, isAdmin } = useAuth();
     const { projects, createProject, deleteProject, currentProject, setCurrentProject } = useProjects();
     const { organization } = useSubscription();
+    const { isViewingClient, viewingClient, stopViewingClient } = useAdminView();
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [activeGlobalView, setActiveGlobalView] = useState<ETLStep>('dashboard');
@@ -64,6 +67,22 @@ const DashboardPage = () => {
 
     return (
         <div className="min-h-screen bg-zinc-950 text-white dark text-foreground flex flex-col">
+            {/* Admin Client View Banner — only renders for admin in client view mode */}
+            {isAdmin && isViewingClient && (
+                <div className="w-full bg-amber-500 text-black px-6 py-3 flex items-center justify-between sticky top-0 z-[60]">
+                    <div className="flex items-center gap-3">
+                        <span className="text-lg">👁</span>
+                        <span className="font-bold">Admin View Mode</span>
+                        <span className="text-sm">— Viewing: {viewingClient?.displayName} ({viewingClient?.email})</span>
+                    </div>
+                    <button
+                        onClick={stopViewingClient}
+                        className="bg-black text-white px-4 py-1 rounded text-sm font-medium hover:bg-gray-800"
+                    >
+                        Exit Client View
+                    </button>
+                </div>
+            )}
             <header className="h-16 border-b border-zinc-800 bg-zinc-900/50 backdrop-blur-md sticky top-0 z-50 px-6 flex items-center justify-between shrink-0">
                 <div className="flex items-center gap-6">
                     {isDemo ? (
@@ -365,6 +384,13 @@ const DashboardPage = () => {
                 onClose={() => setIsModalOpen(false)}
                 onCreate={handleCreateProject}
             />
+
+            {/* Client Files Panel — admin view only */}
+            {isAdmin && isViewingClient && (
+                <div className="pl-80 px-8 pb-12">
+                    <ClientFilesPanel />
+                </div>
+            )}
         </div >
     );
 };

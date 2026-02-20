@@ -9,7 +9,8 @@ import {
     Timestamp,
     setDoc
 } from 'firebase/firestore';
-import { Navigate, Link } from 'react-router-dom';
+import { Navigate, Link, useNavigate } from 'react-router-dom';
+import { useAdminView } from './AdminViewContext';
 import {
     Search,
     ArrowLeft,
@@ -42,6 +43,8 @@ interface JoinedUser {
 
 const AdminDashboard = () => {
     const { user, isAdmin } = useAuth();
+    const { startViewingClient } = useAdminView();
+    const navigate = useNavigate();
     const [users, setUsers] = useState<JoinedUser[]>([]);
     const [fetchLoading, setFetchLoading] = useState(true);
     const [searchQuery, setSearchQuery] = useState("");
@@ -236,6 +239,15 @@ const AdminDashboard = () => {
                 runAction(u.uid, 'trial', 'FREE', 'ACTIVE');
                 break;
         }
+    };
+
+    const handleViewClient = (u: JoinedUser) => {
+        startViewingClient({
+            uid: u.uid,
+            email: u.email,
+            displayName: u.displayName,
+        });
+        navigate('/');
     };
 
     if (!isAdmin) return <Navigate to="/" replace />;
@@ -482,6 +494,15 @@ const AdminDashboard = () => {
                                                             className="px-3 py-1.5 bg-emerald-500/10 hover:bg-emerald-500 text-emerald-500 hover:text-white border border-emerald-500/20 rounded-lg text-[9px] font-black uppercase tracking-widest transition-all"
                                                         >
                                                             Restore Access
+                                                        </button>
+                                                    )}
+                                                    {/* View Client button — only for non-admin, non-revoked users */}
+                                                    {u.role !== 'admin' && u.role !== 'revoked' && (
+                                                        <button
+                                                            onClick={() => handleViewClient(u)}
+                                                            className="px-3 py-1.5 bg-amber-500/10 hover:bg-amber-500 text-amber-500 hover:text-white border border-amber-500/20 rounded-lg text-[9px] font-black uppercase tracking-widest transition-all"
+                                                        >
+                                                            View Client
                                                         </button>
                                                     )}
                                                 </div>

@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { AuthProvider, useAuth } from './features/auth/AuthContext';
 import { ProjectProvider } from './features/projects/ProjectContext';
 import { SubscriptionProvider } from './features/subscription/SubscriptionContext';
+import { AdminViewProvider } from './features/admin/AdminViewContext';
 
 import LoginPage from './features/auth/LoginPage';
 import SignupPage from './features/auth/SignupPage';
@@ -60,41 +61,44 @@ function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <AuthProvider>
-        <SubscriptionProvider>
-          <ProjectProvider>
-            <Router>
-              <Routes>
-                <Route path="/login" element={<LoginPage />} />
-                <Route path="/signup" element={<SignupPage />} />
-                <Route path="/forgot-password" element={<ForgotPasswordPage />} />
-                <Route path="/suspended" element={<SuspendedPage />} />
+        <AdminViewProvider>
+          <SubscriptionProvider>
+            <ProjectProvider>
+              <Router>
+                <Routes>
+                  <Route path="/login" element={<LoginPage />} />
+                  <Route path="/signup" element={<SignupPage />} />
+                  <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+                  <Route path="/suspended" element={<SuspendedPage />} />
 
-                <Route path="/plan-selection" element={
-                  <ProtectedRoute>
-                    <PlanSelectionPage />
-                  </ProtectedRoute>
-                } />
+                  <Route path="/plan-selection" element={
+                    <ProtectedRoute>
+                      <PlanSelectionPage />
+                    </ProtectedRoute>
+                  } />
 
-                <Route path="/" element={
-                  <PlanSelectionRoute>
-                    <DashboardPage />
-                  </PlanSelectionRoute>
-                } />
+                  <Route path="/" element={
+                    <PlanSelectionRoute>
+                      <DashboardPage />
+                    </PlanSelectionRoute>
+                  } />
 
-                <Route path="/admin" element={
-                  <AdminRoute>
-                    <AdminDashboard />
-                  </AdminRoute>
-                } />
+                  <Route path="/admin" element={
+                    <AdminRoute>
+                      <AdminDashboard />
+                    </AdminRoute>
+                  } />
 
-                <Route path="*" element={<Navigate to="/" replace />} />
-              </Routes>
-            </Router>
-          </ProjectProvider>
-        </SubscriptionProvider>
+                  <Route path="*" element={<Navigate to="/" replace />} />
+                </Routes>
+              </Router>
+            </ProjectProvider>
+          </SubscriptionProvider>
+        </AdminViewProvider>
       </AuthProvider>
     </QueryClientProvider>
   );
 }
 
 export default App;
+
