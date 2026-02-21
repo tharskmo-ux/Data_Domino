@@ -31,16 +31,32 @@ class DataLoader:
             Path to generated Excel file
         """
         try:
-            # 1. Validation
+            # 1. Column Mapping
+            df = df.copy() # Avoid modifying original DF
+            if mapping_info:
+                # Map source columns to internal names
+                # Reverse mapping: source -> internal
+                inv_map = {v: k for k, v in mapping_info.items() if v in df.columns}
+                df = df.rename(columns=inv_map)
+
+            # 2. Validation
             if df.empty:
                 raise ValueError("Cannot generate report from empty DataFrame")
             
+            # Ensure required internal fields exist
             required_fields = ['vendor', 'amount', 'date']
             missing = [f for f in required_fields if f not in df.columns]
             if missing:
                 raise ValueError(f"Missing required fields: {missing}")
 
-            # 2. Setup Output Path
+            # 3. Data Type Normalization
+            # Amount should be numeric
+            df['amount'] = pd.to_numeric(df['amount'], errors='coerce')
+
+            # Date Parsing Enhancement
+            df['date'] = df['date'].apply(self._parse_date)
+
+            # 4. Setup Output Path
             if output_path is None:
                 timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
                 output_path = f"procurement_analysis_{timestamp}.xlsx"
@@ -50,13 +66,13 @@ class DataLoader:
             if output_dir.name and not output_dir.exists():
                 output_dir.mkdir(parents=True, exist_ok=True)
 
-            # 3. Create Workbook
+            # 5. Create Workbook
             wb = Workbook()
             # Remove default sheet
             if 'Sheet' in wb.sheetnames:
                 wb.remove(wb['Sheet'])
             
-            # 4. Generate Sheets
+            # 6. Generate Sheets
             logger.info("Generating 'Executive Summary'...")
             self._create_executive_summary(wb, df)
             
@@ -78,7 +94,7 @@ class DataLoader:
             logger.info("Generating 'Data Quality Report'...")
             self._create_data_quality_report(wb, df)
             
-            # 5. Save
+            # 7. Save
             wb.save(output_path)
             logger.info(f"Report saved successfully to: {output_path}")
             
@@ -87,6 +103,22 @@ class DataLoader:
         except Exception as e:
             logger.error(f"Error generating Excel: {str(e)}")
             raise
+
+    def _parse_date(self, val):
+        """Helper to parse dates including Excel serial numbers"""
+        if pd.isna(val):
+            return val
+        if isinstance(val, (int, float, np.integer, np.floating)):
+            # Handle Excel serial numbers (1899-12-30 base)
+            if val > 25569:
+                try:
+                    return pd.to_datetime(val, unit='D', origin='1899-12-30')
+                except:
+                    pass
+        try:
+            return pd.to_datetime(val)
+        except:
+            return pd.NaT
 
     def _create_executive_summary(self, wb, df):
         """Sheet 1: Executive Summary"""
