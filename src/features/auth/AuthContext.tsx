@@ -35,7 +35,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     useEffect(() => {
         if (IS_DEMO_MODE) {
-            console.log("[Auth] Demo Mode Active - Defaulting to isAdmin=true, planSelected=true");
             const demoRole = localStorage.getItem('demo_role') as UserRole || 'admin';
             const email = demoRole === 'admin' ? 'harshad.am@enalsys.com' : 'demo@enalsys.com';
 
@@ -61,7 +60,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                         const activeRole = data.role as UserRole;
                         const isPlanSelected = data.planSelected || false;
 
-                        console.log(`[Auth] Role Sync: role=${activeRole}, planSelected=${isPlanSelected}`);
+
                         setPlanSelected(isPlanSelected);
 
                         if (activeRole === 'revoked') {
@@ -120,7 +119,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     const forgotPassword = async (email: string) => {
         if (IS_DEMO_MODE) {
-            console.log("Demo Mode: Password reset sent to", email);
             return;
         }
         await sendPasswordResetEmail(auth, email);

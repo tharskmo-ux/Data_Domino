@@ -10,15 +10,12 @@ service cloud.firestore {
 
     match /user_roles/{userId} {
       allow read: if request.auth != null && (request.auth.uid == userId || isAdmin());
-
       allow create: if (request.auth != null && request.auth.uid == userId && request.resource.data.role == 'trial')
         || isAdmin();
-
       allow update: if isAdmin() ||
         (request.auth != null && request.auth.uid == userId &&
          request.resource.data.role == resource.data.role &&
          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['planSelected']));
-
       allow delete: if isAdmin();
     }
 
@@ -28,13 +25,16 @@ service cloud.firestore {
     }
 
     match /projects/{projectId} {
-      allow read, write: if request.auth != null && (
-        resource.data.userId == request.auth.uid ||
-        request.resource.data.userId == request.auth.uid ||
-        isAdmin()
+      allow read: if request.auth != null && (
+        resource.data.userId == request.auth.uid || isAdmin()
+      );
+      allow create: if request.auth != null;
+      allow update, delete: if request.auth != null && (
+        resource.data.userId == request.auth.uid || isAdmin()
       );
     }
 
+    // uploads — file upload records saved by backend
     match /uploads/{uploadId} {
       allow read: if request.auth != null && (
         resource.data.userId == request.auth.uid || isAdmin()
@@ -45,6 +45,7 @@ service cloud.firestore {
       );
     }
 
+    // exports — processed output files
     match /exports/{exportId} {
       allow read: if request.auth != null && (
         resource.data.userId == request.auth.uid || isAdmin()

@@ -4,6 +4,8 @@ import { db, IS_DEMO_MODE } from '../../lib/firebase';
 import { doc, getDoc, setDoc, updateDoc, Timestamp } from 'firebase/firestore';
 import type { Organization, Subscription } from '../../types/organization';
 import { ENALSYS_BOOKING_URL } from '../../lib/constants';
+import { useEffectiveUid } from '../../hooks/useEffectiveUid';
+import { useAdminView } from '../admin/AdminViewContext';
 
 interface SubscriptionContextType {
     organization: Organization | null;
@@ -25,13 +27,14 @@ export const useSubscription = () => {
 
 export const SubscriptionProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     const { user, loading: authLoading, isAdmin, isEnterprise } = useAuth();
+    const effectiveUid = useEffectiveUid();
     const [organization, setOrganization] = useState<Organization | null>(null);
     const [loading, setLoading] = useState(true);
 
 
     useEffect(() => {
         if (authLoading) return;
-        if (!user) {
+        if (!effectiveUid || !user) {
             setOrganization(null);
             setLoading(false);
             return;
@@ -42,14 +45,14 @@ export const SubscriptionProvider: React.FC<{ children: React.ReactNode }> = ({ 
                 // Mock data for Demo Mode
                 setOrganization({
                     id: 'demo-org',
-                    name: user.displayName || user.email?.split('@')[0] || 'Demo Workspace',
+                    name: user?.displayName || user?.email?.split('@')[0] || 'Demo Workspace',
                     companyName: 'Demo Corp',
-                    userName: user.email ? user.email.split('@')[0] : 'demo',
-                    displayName: user.displayName || 'Demo User',
-                    adminId: user.uid,
-                    adminEmail: user.email || 'demo@example.com',
+                    userName: user?.email ? user.email.split('@')[0] : 'demo',
+                    displayName: user?.displayName || 'Demo User',
+                    adminId: effectiveUid,
+                    adminEmail: user?.email || 'demo@example.com',
                     createdAt: Timestamp.now(),
-                    members: [user.uid],
+                    members: [effectiveUid],
                     subscription: {
                         type: 'FREE',
                         status: 'ACTIVE',
@@ -62,7 +65,7 @@ export const SubscriptionProvider: React.FC<{ children: React.ReactNode }> = ({ 
 
             try {
                 // For simplified MVP, we assume User ID maps to an Org or we fetch it.
-                const orgRef = doc(db, 'organizations', user.uid);
+                const orgRef = doc(db, 'organizations', effectiveUid);
                 const orgSnap = await getDoc(orgRef);
 
                 if (orgSnap.exists()) {
@@ -72,16 +75,16 @@ export const SubscriptionProvider: React.FC<{ children: React.ReactNode }> = ({ 
                     const userName = user.email ? user.email.split('@')[0] : 'user';
 
                     const newOrg: Organization = {
-                        id: user.uid,
+                        id: effectiveUid,
                         // Step 2: User's displayName if available, falling back to email prefix
-                        name: user.displayName || user.email?.split('@')[0] || 'Workspace',
+                        name: user?.displayName || user?.email?.split('@')[0] || 'Workspace',
                         companyName: "", // Default to empty string
                         userName,
-                        displayName: user.displayName || null,
-                        adminId: user.uid,
-                        adminEmail: user.email || '',
+                        displayName: user?.displayName || null,
+                        adminId: effectiveUid,
+                        adminEmail: user?.email || '',
                         createdAt: Timestamp.now(),
-                        members: [user.uid],
+                        members: [effectiveUid],
                         subscription: {
                             type: 'FREE',
                             status: 'ACTIVE',
@@ -99,10 +102,33 @@ export const SubscriptionProvider: React.FC<{ children: React.ReactNode }> = ({ 
         };
 
         fetchOrg();
-    }, [user, authLoading]);
+    }, [effectiveUid, authLoading, user]);
+
+    const { isViewingClient, viewingClient } = useAdminView();
 
     const checkAccess = (feature: 'advanced_export' | 'unlimited_projects' | 'team_management' | 'savings_roi') => {
+        // GLOBAL ADMIN/ENTERPRISE OVERRIDE: 
+        // Real admins and enterprise users always have full access to view data unblurred, 
+        // even when mirroring a restricted trial client.
         if (isAdmin || isEnterprise) return true;
+
+        // If mirroring, use mirrored user's permissions (only reaches here for non-admins)
+        if (isViewingClient && viewingClient) {
+            const mirroredRole = viewingClient.role;
+            const mirroredIsEnterprise = mirroredRole === 'enterprise' || mirroredRole === 'admin';
+
+            if (mirroredIsEnterprise) return true;
+
+            // Free Tier Limits for mirrored user
+            switch (feature) {
+                case 'advanced_export': return false;
+                case 'team_management': return false;
+                case 'unlimited_projects': return false;
+                case 'savings_roi': return false;
+                default: return true;
+            }
+        }
+
         if (!organization) return false;
 
         // Trial/Free Tier Limits
@@ -116,10 +142,10 @@ export const SubscriptionProvider: React.FC<{ children: React.ReactNode }> = ({ 
     };
 
     const updateCompanyName = async (name: string) => {
-        if (!user || !organization) return;
+        if (!effectiveUid || !organization) return;
 
         try {
-            const orgRef = doc(db, 'organizations', user.uid);
+            const orgRef = doc(db, 'organizations', effectiveUid);
             await updateDoc(orgRef, { companyName: name, name: name });
 
             // Update local state

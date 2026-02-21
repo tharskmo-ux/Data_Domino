@@ -1,29 +1,100 @@
-import { useAuth } from '../auth/AuthContext';
-import { auth } from '../../lib/firebase';
-import { signOut } from 'firebase/auth';
-import { LogOut, Plus, FolderOpen, TrendingUp, ShieldCheck, Clock, Trash2, ArrowRight, Users, Target } from 'lucide-react';
-import { cn } from '../../lib/utils';
 import { useState, useEffect } from 'react';
+import { motion } from 'framer-motion';
+import {
+    Plus,
+    FolderOpen,
+    TrendingUp,
+    ShieldCheck,
+    Clock,
+    ArrowRight,
+    Trash2,
+    Target,
+    Users,
+    LogOut
+} from 'lucide-react';
+import { useAuth } from '../auth/AuthContext';
+import { useProjects, normalizeProject } from './ProjectContext';
+import { useSubscription } from '../subscription/SubscriptionContext';
+import { cn } from '../../lib/utils';
+import ProjectView from './ProjectView';
+import { signOut } from 'firebase/auth';
+import { auth, db } from '../../lib/firebase';
+import {
+    collection, query, where,
+    onSnapshot, getDocs, deleteDoc
+} from 'firebase/firestore';
+import { useEffectiveUid } from '../../hooks/useEffectiveUid';
 import CreateProjectModal from './CreateProjectModal';
 import GlobalSettingsModal from '../settings/GlobalSettingsModal';
-import ProjectView from './ProjectView';
-import { useProjects } from './ProjectContext';
-import AppSidebar, { type ETLStep } from '../../components/AppSidebar';
-import { motion } from 'framer-motion';
+import AppSidebar from '../../components/AppSidebar';
+import type { ETLStep } from '../../components/AppSidebar';
 import ActivityHistory from '../etl/ActivityHistory';
-import { useSubscription } from '../subscription/SubscriptionContext';
 import OrganizationNameModal from '../subscription/OrganizationNameModal';
 import { useAdminView } from '../admin/AdminViewContext';
 import ClientFilesPanel from '../admin/ClientFilesPanel';
 
 const DashboardPage = () => {
     const { user, isDemo, role, isAdmin } = useAuth();
-    const { projects, createProject, deleteProject, currentProject, setCurrentProject } = useProjects();
+    const { createProject, deleteProject, currentProject, setCurrentProject, checkTrialLimit } = useProjects();
     const { organization } = useSubscription();
     const { isViewingClient, viewingClient, stopViewingClient } = useAdminView();
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [activeGlobalView, setActiveGlobalView] = useState<ETLStep>('dashboard');
+
+    const [projects, setProjects] = useState<any[]>([]);
+    const [totalSpend, setTotalSpend] = useState(0);
+    const [savingsPotentialMax, setSavingsPotentialMax] = useState(0);
+    const [uniqueVendors, setUniqueVendors] = useState(0);
+    const [showResumePrompt, setShowResumePrompt] = useState(false);
+    const [resumeStep, setResumeStep] = useState<string | number>(0);
+    const [isLimitReached, setIsLimitReached] = useState(false);
+
+    const effectiveUid = useEffectiveUid();
+
+    // EFFECTIVE ROLE: If viewing a client, use their role for UI logic
+    const effectiveRole = (isAdmin && isViewingClient && viewingClient) ? viewingClient.role : role;
+
+    useEffect(() => {
+        const cleanupAbandonedProjects = async (uid: string) => {
+            try {
+                const allProjectsQuery = query(
+                    collection(db, 'projects'),
+                    where('userId', '==', uid)
+                );
+                const snap = await getDocs(allProjectsQuery);
+                const oneHourAgo = Date.now() - 60 * 60 * 1000;
+                const deletePromises = snap.docs
+                    .filter(d => {
+                        const data = d.data();
+                        // Only delete if truly empty — no file uploaded, no pipeline progress, AND older than 1 hour
+                        if (data.rawGridUrl) return false;
+                        if (data.currentStep !== 0) return false;
+                        const createdAt = data.createdAt;
+                        if (!createdAt) return false;
+                        const ts = createdAt.toMillis ? createdAt.toMillis() : new Date(createdAt).getTime();
+                        return ts < oneHourAgo;
+                    })
+                    .map(d => deleteDoc(d.ref));
+                await Promise.all(deletePromises);
+            } catch (err) {
+                console.error('Cleanup failed:', err);
+            }
+        };
+
+        if (effectiveUid) {
+            cleanupAbandonedProjects(effectiveUid);
+        }
+    }, [effectiveUid]);
+
+
+    useEffect(() => {
+        if (effectiveRole === 'trial' && effectiveUid) {
+            checkTrialLimit(effectiveUid).then(reached => setIsLimitReached(reached));
+        } else {
+            setIsLimitReached(false);
+        }
+    }, [effectiveUid, effectiveRole, checkTrialLimit]);
 
     useEffect(() => {
         const params = new URLSearchParams(window.location.search);
@@ -48,6 +119,53 @@ const DashboardPage = () => {
         }
     }, [setCurrentProject]);
 
+    // Real-time project synchronization
+    useEffect(() => {
+        if (!effectiveUid) return;
+
+        const q = query(
+            collection(db, 'projects'),
+            where('userId', '==', effectiveUid)
+            // Removed: where('currentStep', '>=', 1), orderBy('updatedAt', 'desc'), limit(10) to avoid composite index requirements
+        );
+
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            if (!snapshot.empty) {
+                // Map, filter step 0, sort manually, then limit to latest 10
+                let projectsData = snapshot.docs
+                    .map(d => normalizeProject(d.data(), d.id.split('_')[1] || d.id))
+                    .filter(p => !p.currentStep || (typeof p.currentStep === 'number' && p.currentStep >= 1) || (typeof p.currentStep === 'string' && p.currentStep !== 'upload'))
+                    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+                // Take top 10
+                projectsData = projectsData.slice(0, 10);
+
+                setProjects(projectsData);
+
+                const latest = projectsData[0] as any;
+                if (latest && latest.latestAnalysis) {
+                    setTotalSpend(latest.latestAnalysis.totalSpend ?? 0);
+                    setSavingsPotentialMax(latest.latestAnalysis.savingsPotentialMax ?? 0);
+                    setUniqueVendors(latest.latestAnalysis.uniqueVendors ?? 0);
+                }
+
+                if (latest && latest.status !== 'data_quality_complete' && latest.currentStep > 0) {
+                    setShowResumePrompt(true);
+                    setResumeStep(latest.currentStep);
+                } else {
+                    setShowResumePrompt(false);
+                }
+            } else {
+                setProjects([]);
+                setShowResumePrompt(false);
+            }
+        }, (error) => {
+            console.error('Project listener error:', error);
+        });
+
+        return () => unsubscribe();
+    }, [effectiveUid]);
+
     // If a project is selected, show the project workspace instead of the dashboard
     if (currentProject) {
         return <ProjectView key={currentProject.id} />;
@@ -69,17 +187,19 @@ const DashboardPage = () => {
         <div className="min-h-screen bg-zinc-950 text-white dark text-foreground flex flex-col">
             {/* Admin Client View Banner — only renders for admin in client view mode */}
             {isAdmin && isViewingClient && (
-                <div className="w-full bg-amber-500 text-black px-6 py-3 flex items-center justify-between sticky top-0 z-[60]">
-                    <div className="flex items-center gap-3">
-                        <span className="text-lg">👁</span>
+                <div className="w-full bg-amber-500/15 border-b border-amber-500/30 px-4 py-1.5 flex items-center justify-between z-[60] shrink-0">
+                    <div className="flex items-center gap-2 text-amber-400 text-xs text-[10px] uppercase font-bold tracking-widest">
+                        <span>👁</span>
                         <span className="font-bold">Admin View Mode</span>
-                        <span className="text-sm">— Viewing: {viewingClient?.displayName} ({viewingClient?.email})</span>
+                        <span className="text-amber-400/70 translate-y-[1px]">
+                            — {viewingClient?.displayName} ({viewingClient?.email})
+                        </span>
                     </div>
                     <button
                         onClick={stopViewingClient}
-                        className="bg-black text-white px-4 py-1 rounded text-sm font-medium hover:bg-gray-800"
+                        className="text-amber-400 hover:text-amber-300 text-[10px] font-bold uppercase tracking-widest underline underline-offset-4"
                     >
-                        Exit Client View
+                        Exit
                     </button>
                 </div>
             )}
@@ -139,17 +259,21 @@ const DashboardPage = () => {
                     )}
 
                     <div className="flex flex-col items-end mr-2">
-                        <span className="text-sm font-medium text-zinc-200">{user?.displayName || 'User'}</span>
+                        <span className="text-sm font-medium text-zinc-200">
+                            {(isAdmin && isViewingClient && viewingClient) ? viewingClient.displayName : user?.displayName || 'User'}
+                        </span>
                         <div className="flex items-center gap-2">
                             <span className={cn(
                                 "px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-widest border",
-                                role === 'admin' ? "bg-red-500/10 text-red-400 border-red-500/20" :
-                                    role === 'enterprise' ? "bg-primary/10 text-primary border-primary/20" :
+                                effectiveRole === 'admin' ? "bg-red-500/10 text-red-400 border-red-500/20" :
+                                    effectiveRole === 'enterprise' ? "bg-primary/10 text-primary border-primary/20" :
                                         "bg-amber-500/10 text-amber-400 border-amber-500/20"
                             )}>
-                                {role === 'admin' ? 'Admin' : role === 'enterprise' ? 'Enterprise' : 'Trial'}
+                                {effectiveRole === 'admin' ? 'Admin' : effectiveRole === 'enterprise' ? 'Enterprise' : 'Trial'}
                             </span>
-                            <span className="text-[10px] text-zinc-500 font-medium">{user?.email}</span>
+                            <span className="text-[10px] text-zinc-500 font-medium">
+                                {(isAdmin && isViewingClient && viewingClient) ? viewingClient.email : user?.email}
+                            </span>
                         </div>
                     </div>
                     <button
@@ -195,31 +319,57 @@ const DashboardPage = () => {
                                         <p className="text-zinc-400">Here's an overview of your procurement data projects.</p>
                                     </div>
                                     <button
-                                        onClick={() => setIsModalOpen(true)}
-                                        disabled={role === 'trial' && projects.length >= 1}
+                                        onClick={() => isLimitReached ? window.open('https://enalsys.com/contact', '_blank') : setIsModalOpen(true)}
                                         className={cn(
                                             "group px-6 py-2.5 rounded-xl font-bold flex items-center gap-2 transition-all shadow-lg",
-                                            role === 'trial' && projects.length >= 1
-                                                ? "bg-zinc-800 text-zinc-500 cursor-not-allowed border border-zinc-700 shadow-none"
+                                            (effectiveRole === 'trial' && isLimitReached && !isAdmin)
+                                                ? "bg-amber-500/20 text-amber-400 border border-amber-500/30 hover:bg-amber-500/30"
                                                 : "bg-primary hover:bg-primary/90 text-white shadow-primary/20 hover:shadow-primary/30"
                                         )}
                                     >
                                         <div className={cn(
                                             "p-1 rounded-lg transition-transform",
-                                            role === 'trial' && projects.length >= 1 ? "bg-zinc-700" : "bg-white/20 group-hover:scale-110"
+                                            (effectiveRole === 'trial' && isLimitReached && !isAdmin) ? "bg-amber-500/20" : "bg-white/20 group-hover:scale-110"
                                         )}>
                                             <Plus className="h-4 w-4" />
                                         </div>
-                                        {role === 'trial' && projects.length >= 1 ? 'Project Limit Reached' : 'Create New Project'}
+                                        {(effectiveRole === 'trial' && isLimitReached && !isAdmin) ? 'Upgrade to Enterprise' : 'Create New Project'}
                                     </button>
                                 </div>
+
+                                {showResumePrompt && (
+                                    <div className="mb-10 bg-primary/10 border border-primary/20 rounded-2xl p-6 flex items-center justify-between animate-in slide-in-from-top duration-500">
+                                        <div className="flex items-center gap-4">
+                                            <div className="w-12 h-12 bg-primary/20 rounded-xl flex items-center justify-center text-primary">
+                                                <TrendingUp className="h-6 w-6" />
+                                            </div>
+                                            <div>
+                                                <h3 className="font-bold text-lg text-white">Resume your project</h3>
+                                                <p className="text-sm text-zinc-400">You were at Step {resumeStep}. Jump back in to continue your analysis.</p>
+                                            </div>
+                                        </div>
+                                        <button
+                                            onClick={() => setCurrentProject(projects[0])}
+                                            className="px-6 py-2 bg-primary hover:bg-primary/90 text-white rounded-lg font-bold transition-all flex items-center gap-2 shadow-lg shadow-primary/20"
+                                        >
+                                            Continue <ArrowRight className="h-4 w-4" />
+                                        </button>
+                                    </div>
+                                )}
 
                                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-12">
                                     {[
                                         { label: 'Projects Count', value: projects.length.toString(), icon: FolderOpen, color: 'text-blue-500', bg: 'bg-blue-500/10', border: 'border-blue-500/20' },
-                                        { label: 'Total Spend Processed', value: '₹0', icon: TrendingUp, color: 'text-emerald-500', bg: 'bg-emerald-500/10', border: 'border-emerald-500/20' },
-                                        { label: 'Avg Data Quality', value: '0%', icon: ShieldCheck, color: 'text-amber-500', bg: 'bg-amber-500/10', border: 'border-amber-500/20' },
-                                        { label: 'Last Activity', value: projects.length > 0 ? 'Today' : 'None', icon: Clock, color: 'text-purple-500', bg: 'bg-purple-500/10', border: 'border-purple-500/20' },
+                                        {
+                                            label: 'Total Spend Processed',
+                                            value: new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', notation: 'compact' }).format(totalSpend),
+                                            icon: TrendingUp,
+                                            color: 'text-emerald-500',
+                                            bg: 'bg-emerald-500/10',
+                                            border: 'border-emerald-500/20'
+                                        },
+                                        { label: 'Potential Savings', value: new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', notation: 'compact' }).format(savingsPotentialMax), icon: ShieldCheck, color: 'text-amber-500', bg: 'bg-amber-500/10', border: 'border-amber-500/20' },
+                                        { label: 'Unique Suppliers', value: uniqueVendors.toString(), icon: Users, color: 'text-purple-500', bg: 'bg-purple-500/10', border: 'border-purple-500/20' },
                                     ].map((stat, i) => (
                                         <div key={i} className="group bg-zinc-900/50 backdrop-blur-sm border border-zinc-800 p-6 rounded-2xl hover:border-zinc-700 transition-all hover:-translate-y-1 hover:shadow-xl hover:shadow-black/50">
                                             <div className="flex justify-between items-start mb-4">
@@ -272,7 +422,7 @@ const DashboardPage = () => {
                                                                 }`}>
                                                                 {project.status || 'Active'}
                                                             </div>
-                                                            {role !== 'trial' && (
+                                                            {(isAdmin || effectiveRole !== 'trial') && (
                                                                 <button
                                                                     onClick={(e) => {
                                                                         e.stopPropagation();
@@ -295,7 +445,14 @@ const DashboardPage = () => {
                                                         <div className="bg-zinc-950/50 rounded-xl p-3 border border-zinc-800">
                                                             <div className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest mb-1">Total Spend</div>
                                                             <div className="text-lg font-bold text-white font-mono">
-                                                                {new Intl.NumberFormat('en-IN', { style: 'currency', currency: project.currency || 'INR', notation: 'compact' }).format(project.stats?.spend || 0)}
+                                                                {(() => {
+                                                                    try {
+                                                                        const currency = (project.currency?.length === 3) ? project.currency : 'INR';
+                                                                        return new Intl.NumberFormat('en-IN', { style: 'currency', currency, notation: 'compact' }).format(project.stats?.spend || 0);
+                                                                    } catch (e) {
+                                                                        return `₹${(project.stats?.spend || 0).toLocaleString()}`;
+                                                                    }
+                                                                })()}
                                                             </div>
                                                         </div>
                                                         <div className="bg-zinc-950/50 rounded-xl p-3 border border-zinc-800">
@@ -321,7 +478,10 @@ const DashboardPage = () => {
                                                     <div className="flex items-center justify-between pt-4 border-t border-zinc-800/50">
                                                         <div className="flex items-center gap-2 text-xs font-medium text-zinc-500">
                                                             <Clock className="h-3.5 w-3.5" />
-                                                            <span>Created {new Date(project.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>
+                                                            <span>Created {(() => {
+                                                                const d = new Date(project.createdAt);
+                                                                return isNaN(d.getTime()) ? 'Recently' : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+                                                            })()}</span>
                                                         </div>
                                                         <div className="flex items-center gap-1.5 text-zinc-400 text-xs font-bold uppercase tracking-wider group-hover:text-primary transition-colors group-hover:translate-x-1 duration-300">
                                                             Open Project <ArrowRight className="h-3.5 w-3.5" />
@@ -343,9 +503,7 @@ const DashboardPage = () => {
                                         <p className="text-zinc-500 text-lg">Audit trail across all procurement projects</p>
                                     </div>
                                 </div>
-                                <ActivityHistory
-                                    activities={projects.flatMap(p => (p.activities || []).map(a => ({ ...a, label: `[${p.name}] ${a.label}` }))).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())}
-                                />
+                                <ActivityHistory />
                             </div>
                         )}
 
@@ -376,7 +534,7 @@ const DashboardPage = () => {
 
                     </div>
                 </main>
-            </div >
+            </div>
 
 
             <CreateProjectModal
@@ -385,13 +543,11 @@ const DashboardPage = () => {
                 onCreate={handleCreateProject}
             />
 
-            {/* Client Files Panel — admin view only */}
-            {isAdmin && isViewingClient && (
-                <div className="pl-80 px-8 pb-12">
-                    <ClientFilesPanel />
-                </div>
-            )}
-        </div >
+            {/* Client Files Panel — dynamically handles admin vs enterprise view internally */}
+            <div className="pl-80 px-8 pb-12">
+                <ClientFilesPanel />
+            </div>
+        </div>
     );
 };
 

@@ -1,7 +1,6 @@
 import React, { useState, useMemo } from 'react';
-import { X, Search, ArrowUpDown, ArrowUp, ArrowDown, Users } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
-import { cn } from '../../lib/utils';
+import { X, Search, ArrowUp, ArrowDown, Users } from 'lucide-react';
+import { motion } from 'framer-motion';
 
 interface SupplierListModalProps {
     isOpen: boolean;

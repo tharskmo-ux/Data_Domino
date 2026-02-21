@@ -17,7 +17,7 @@ export interface FileMetadata {
 }
 
 interface FileUploadProps {
-    onUploadComplete: (data: any[], metadata: FileMetadata, rawSheetData?: any[][], merges?: any[], worksheet?: any) => void;
+    onUploadComplete: (data: any[], metadata: FileMetadata, rawSheetData?: any[][], merges?: any[], worksheet?: any, rawFile?: File) => void;
     maxSizeMB?: number;
     disabled?: boolean;
 }
@@ -68,7 +68,7 @@ const FileUpload: React.FC<FileUploadProps> = ({ onUploadComplete, maxSizeMB = 1
                 const headers = jsonData.length > 0 ? Object.keys(jsonData[0]) : [];
 
                 // Calculate Data Quality (ratio of non-null values)
-                let totalCells = jsonData.length * headers.length;
+                const totalCells = jsonData.length * headers.length;
                 let nonNullCells = 0;
                 jsonData.forEach(row => {
                     headers.forEach(header => {
@@ -96,8 +96,8 @@ const FileUpload: React.FC<FileUploadProps> = ({ onUploadComplete, maxSizeMB = 1
                     );
 
                     if (updated.every(f => f.status === 'completed')) {
-                        // Pass along raw worksheet and data for intelligent header selection
-                        (onUploadComplete as any)(jsonData, metadata, rawSheetData, worksheet['!merges'], worksheet);
+                        // Pass along raw worksheet, data, AND the original File for Storage upload
+                        (onUploadComplete as any)(jsonData, metadata, rawSheetData, worksheet['!merges'], worksheet, fileObj.file);
                     }
                     return updated;
                 });

@@ -13,7 +13,6 @@ export class ExcelGenerator {
     constructor(data: DataRow[], mappings: any, currency: string = 'USD') {
         this.workbook = new ExcelJS.Workbook();
         this.data = data;
-        // @ts-ignore
         this.mappings = mappings;
 
         // Map common codes to symbols
@@ -200,7 +199,6 @@ export class ExcelGenerator {
 
         // Headers
         const headers = ['Rank', 'Vendor Name', 'Total Spend', '% of Total', 'Transaction Count', 'Avg Transaction'];
-        const headerRow = sheet.getRow(1);
         headers.forEach((h, i) => {
             const cell = sheet.getCell(1, i + 1);
             cell.value = h;
@@ -286,7 +284,7 @@ export class ExcelGenerator {
         // Group by Month
         const monthStats: Record<string, number> = {};
         this.data.forEach(row => {
-            let dateVal = row[dateKey];
+            const dateVal = row[dateKey];
             let date: Date | null = null;
 
             if (dateVal) {
@@ -490,7 +488,6 @@ export class ExcelGenerator {
             sheet.getColumn(dateColIndex + 1).numFmt = 'dd/mm/yyyy';
         }
 
-        // @ts-ignore
         sheet.autoFilter = { from: 'A1', to: { row: 1, column: headers.length } };
     }
 
