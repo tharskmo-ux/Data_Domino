@@ -16,7 +16,7 @@ export function parseDateValue(val: any): Date | null {
         date = new Date((numVal - 25569) * 86400 * 1000);
     } else if (typeof val === 'string') {
         // Try parsing DD/MM/YYYY or DD-MM-YYYY
-        const ddmmyyyy = /^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4})/;
+        const ddmmyyyy = /^(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})/;
         const match = val.match(ddmmyyyy);
         if (match) {
             date = new Date(parseInt(match[3]), parseInt(match[2]) - 1, parseInt(match[1]));

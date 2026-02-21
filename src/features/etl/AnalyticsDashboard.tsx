@@ -17,7 +17,8 @@ import {
     Lock,
     Calendar,
     Mail,
-    ArrowLeft
+    ArrowLeft,
+    Database
 } from 'lucide-react';
 import { ExcelGenerator } from '../../utils/ExcelGenerator';
 import TeamManagement from './TeamManagement';
@@ -38,6 +39,11 @@ import SourcingDrilldown from './SourcingDrilldown';
 import SupplierSummaryDrilldown from './SupplierSummaryDrilldown';
 import SummaryDrilldown from './SummaryDrilldown';
 import { useSubscription } from '../subscription/SubscriptionContext';
+import { useAdminView } from '../admin/AdminViewContext';
+import { useEffectiveUid } from '../../hooks/useEffectiveUid';
+import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
+import { db, storage } from '../../lib/firebase';
 
 interface AnalyticsDashboardProps {
     data: any[];
@@ -46,11 +52,26 @@ interface AnalyticsDashboardProps {
     initialTab?: 'overview' | 'suppliers' | 'savings' | 'categorization';
     currency?: string;
     projectStats?: any;
+    restoredAnalysis?: any;
+    restoredStats?: {
+        totalSpend: number;
+        savingsPotentialMin: number;
+        savingsPotentialMax: number;
+        uniqueVendors: number;
+        duplicateCount: number;
+        abcA: number;
+        abcB: number;
+        abcC: number;
+    };
 }
 
-const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings, clusters, initialTab = 'overview', currency = 'INR' }) => {
+const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings, clusters, initialTab = 'overview', currency = 'INR', projectStats, restoredAnalysis, restoredStats }) => {
     const { currentProject, addActivity } = useProjects();
     const { isAdmin } = useAuth();
+    const effectiveUid = useEffectiveUid();
+    const { isViewingClient } = useAdminView();
+    // isAdminMirror: admin actively viewing a client — show full enterprise output unconditionally
+    const isAdminMirror = isAdmin && isViewingClient;
     const { checkAccess } = useSubscription();
     const canExport = checkAccess('advanced_export');
     const [isTeamModalOpen, setIsTeamModalOpen] = useState(false);
@@ -204,9 +225,9 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
             };
         }, { spend: 0, count: 0, contractedSpend: 0, ptRiskSpend: 0 });
 
-        const totalSpend = stats.spend;
+        const totalSpend = stats.spend || restoredAnalysis?.totalSpend || projectStats?.spend || 0;
         const contractedPercent = totalSpend > 0 ? (stats.contractedSpend / totalSpend) * 100 : 0;
-        const vendorCount = clusters.length > 0 ? clusters.length : new Set(filteredRows.map(r => String(r[mappings['supplier']] || ''))).size;
+        const vendorCount = clusters.length > 0 ? clusters.length : (restoredAnalysis?.uniqueVendors || new Set(filteredRows.map(r => String(r[mappings['supplier']] || ''))).size);
 
         // 0. Global Pre-calculation for Item Details (Min Price & Sourcing Status)
         // We need this from the FULL dataset 'data' to ensure 'Single Source' and 'Min Price' are accurate globally,
@@ -527,7 +548,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
             { name: 'Indirect', value: Math.round((spendTypeMap.Indirect / totalSpend) * 100) || 0, color: '#f43f5e' }
         ].filter(i => i.value > 0);
 
-        const identifiedSavings = totalIdentifiedSavings;
+        const identifiedSavings = totalIdentifiedSavings || restoredAnalysis?.savingsPotentialMin || projectStats?.savingsPotential || (totalSpend * 0.1);
 
         const supplierSummaryBySpend = Object.entries(supplierStatsMap).map(([name, stats]) => ({
             [mappings['supplier']]: name,
@@ -560,6 +581,12 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
 
         const tailStartThreshold = totalSpend * 0.80; // Pareto 80/20
         const longTailThreshold = totalSpend * 0.95;
+
+        // ABC Distribution Sourcing - Use restoredStats as fallbacks for initial display
+        const totalA = restoredStats?.abcA || 0;
+        const totalB = restoredStats?.abcB || 0;
+        const totalC = restoredStats?.abcC || 0;
+        const hasRestoredABC = totalA > 0 || totalB > 0 || totalC > 0;
 
         sortedSuppliersBySpendDesc.forEach((s) => {
             const prevCumSpend = runningCumSpend;
@@ -801,7 +828,11 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                         { label: 'Tail Suppliers', value: tailSuppliersPercentage, type: 'percent' },
                         { label: 'Tail Transactions', value: tailTxnsPercentage, type: 'percent' }
                     ],
-                    topDistribution: [
+                    topDistribution: (hasRestoredABC && !filteredRows.length) ? [
+                        { name: 'Head (Core Suppliers)', share: Math.round((totalA / (totalSpend || 1)) * 100) },
+                        { name: 'Mid-Tail (Consolidation)', share: Math.round((totalB / (totalSpend || 1)) * 100) },
+                        { name: 'Long-Tail (Tail-End)', share: Math.round((totalC / (totalSpend || 1)) * 100) }
+                    ] : [
                         { name: 'Head (Core Suppliers)', share: Math.round((headSuppliers.size / (vendorCount || 1)) * 100) },
                         { name: 'Mid-Tail (Consolidation)', share: Math.round((midTailSuppliers.size / (vendorCount || 1)) * 100) },
                         { name: 'Long-Tail (Tail-End)', share: Math.round((longTailSuppliers.size / (vendorCount || 1)) * 100) }
@@ -809,6 +840,18 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                     data: filteredRows.filter(row => finalTailSuppliersSet.has(String(row[mappings['supplier']] || '').trim())),
                     tailStats: tailSummary
                 },
+                {
+                    id: 'duplicates',
+                    icon: Database,
+                    label: 'Duplicate Transactions',
+                    value: restoredStats?.duplicateCount || 0,
+                    type: 'number',
+                    color: (restoredStats?.duplicateCount || 0) > 0 ? 'rose' : 'emerald',
+                    subMetrics: [
+                        { label: 'Flagged for Review', value: restoredStats?.duplicateCount || 0, type: 'number' }
+                    ],
+                    data: null // No drilldown for restored dups currently
+                }
             ],
             opportunities: clusters
                 .map(s => {
@@ -858,16 +901,40 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
             link.setAttribute("download", filename);
             document.body.appendChild(link);
 
-            // 3. Trigger Download
+            // 3. Trigger Download (existing behaviour — unchanged)
             link.click();
             document.body.removeChild(link);
             URL.revokeObjectURL(url);
 
-            // 4. Log Activity
+            // 4. Persist to Firebase Storage + Firestore (non-fatal, additive) — only if not in admin view mode
+            let fileUrl: string | undefined;
+            if (effectiveUid && db && storage && !isViewingClient) {
+                try {
+                    const storagePath = `exports/${effectiveUid}/${Date.now()}_${filename}`;
+                    const storageRef = ref(storage, storagePath);
+                    const snapshot = await uploadBytes(storageRef, blob);
+                    fileUrl = await getDownloadURL(snapshot.ref);
+
+                    await addDoc(collection(db, 'exports'), {
+                        userId: effectiveUid,
+                        projectId: currentProject?.id || '',
+                        fileName: filename,
+                        fileUrl,
+                        filePath: snapshot.ref.fullPath,
+                        exportedAt: serverTimestamp(),
+                        rowCount: rowsToExport.length,
+                    });
+                } catch (persistErr) {
+                    console.error('[ExportExcel Persist] Firebase error:', persistErr);
+                }
+            }
+
+            // 5. Log Activity (with fileUrl if available for Re-download)
             addActivity(currentProject?.id || '', {
                 type: 'export',
                 label: filename,
-                details: 'Comprehensive Excel export with 7-sheet analysis.'
+                details: 'Comprehensive Excel export with 7-sheet analysis.',
+                metadata: fileUrl ? { fileUrl } : undefined,
             });
         } catch (error) {
             console.error('Export failed:', error);
@@ -1346,7 +1413,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                                     tickLine={false}
                                                     axisLine={false}
                                                     tick={{ fill: '#a1a1aa', fontSize: 10 }}
-                                                    tickFormatter={(val) => `${(val / 1000000).toFixed(1)}M`}
+                                                    tickFormatter={(val: any) => `${(Number(val) / 1000000).toFixed(1)}M`}
                                                 />
                                                 <Tooltip
                                                     cursor={{ stroke: '#fff', strokeWidth: 1, strokeDasharray: '4 4' }}
@@ -1637,7 +1704,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                                 key={opp.id}
                                                 className={cn(
                                                     "bg-zinc-900/40 border border-zinc-800 rounded-[2rem] p-6 transition-all relative overflow-hidden group/opp",
-                                                    !isAdmin && "blur-md pointer-events-none select-none opacity-40"
+                                                    !isAdmin && !isAdminMirror && "blur-md pointer-events-none select-none opacity-40"
                                                 )}
                                             >
                                                 <div className="flex items-center justify-between mb-4">
@@ -1709,24 +1776,30 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                 </div>
 
                                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 relative group/bottom">
-                                    <div className="absolute inset-x-0 bottom-0 top-0 z-30 flex items-center justify-center p-12 text-center bg-black/40 backdrop-blur-md rounded-[2.5rem] border border-white/5 group-hover/bottom:backdrop-blur-0 transition-all duration-700">
-                                        <div className="max-w-md">
-                                            <div className="w-16 h-16 bg-primary/20 rounded-3xl flex items-center justify-center mx-auto mb-6">
-                                                <Target className="h-8 w-8 text-primary" />
+                                    {/* Deep Intelligence Gate — hidden for admin mirror view */}
+                                    {!isAdmin && (
+                                        <div className="absolute inset-x-0 bottom-0 top-0 z-30 flex items-center justify-center p-12 text-center bg-black/40 backdrop-blur-md rounded-[2.5rem] border border-white/5 group-hover/bottom:backdrop-blur-0 transition-all duration-700">
+                                            <div className="max-w-md">
+                                                <div className="w-16 h-16 bg-primary/20 rounded-3xl flex items-center justify-center mx-auto mb-6">
+                                                    <Target className="h-8 w-8 text-primary" />
+                                                </div>
+                                                <h3 className="text-2xl font-black mb-3 text-white uppercase tracking-tighter italic">Deep Intelligence Gated</h3>
+                                                <p className="text-sm text-zinc-400 font-medium mb-8">
+                                                    To prevent market signaling and protect your negotiation leverage, detailed category benchmarks and execution roadmaps are restricted to verified strategic partners.
+                                                </p>
+                                                <button
+                                                    onClick={() => window.open(ENALSYS_BOOKING_URL, '_blank')}
+                                                    className="bg-white text-black px-8 py-4 rounded-2xl font-black text-xs uppercase tracking-widest shadow-2xl hover:bg-zinc-200 transition-all active:scale-95"
+                                                >
+                                                    Unlock Strategy Roadmap
+                                                </button>
                                             </div>
-                                            <h3 className="text-2xl font-black mb-3 text-white uppercase tracking-tighter italic">Deep Intelligence Gated</h3>
-                                            <p className="text-sm text-zinc-400 font-medium mb-8">
-                                                To prevent market signaling and protect your negotiation leverage, detailed category benchmarks and execution roadmaps are restricted to verified strategic partners.
-                                            </p>
-                                            <button
-                                                onClick={() => window.open(ENALSYS_BOOKING_URL, '_blank')}
-                                                className="bg-white text-black px-8 py-4 rounded-2xl font-black text-xs uppercase tracking-widest shadow-2xl hover:bg-zinc-200 transition-all active:scale-95"
-                                            >
-                                                Unlock Strategy Roadmap
-                                            </button>
                                         </div>
-                                    </div>
-                                    <div className="bg-zinc-900/40 border border-zinc-900 rounded-[2.5rem] p-8 blur-[1px] opacity-40 group-hover/bottom:blur-none group-hover/bottom:opacity-100 transition-all duration-1000 pointer-events-none select-none">
+                                    )}
+                                    <div className={cn(
+                                        "bg-zinc-900/40 border border-zinc-900 rounded-[2.5rem] p-8 transition-all duration-1000",
+                                        isAdmin ? "opacity-100" : "blur-[1px] opacity-40 group-hover/bottom:blur-none group-hover/bottom:opacity-100 pointer-events-none select-none"
+                                    )}>
                                         <h3 className="text-xl font-bold mb-8 uppercase tracking-widest text-zinc-400">Strategic Levers</h3>
                                         <div className="space-y-6">
                                             {dynamicStats.savingsLevers.slice(0, 5).map((lever) => (
@@ -1743,7 +1816,10 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                         </div>
                                     </div>
 
-                                    <div className="bg-zinc-900/40 border border-zinc-900 rounded-[2.5rem] p-8 blur-3xl saturate-0 opacity-20 pointer-events-none select-none transition-all duration-1000 group-hover/bottom:blur-xl">
+                                    <div className={cn(
+                                        "bg-zinc-900/40 border border-zinc-900 rounded-[2.5rem] p-8 transition-all duration-1000",
+                                        isAdmin ? "opacity-100" : "blur-3xl saturate-0 opacity-20 pointer-events-none select-none group-hover/bottom:blur-xl"
+                                    )}>
                                         <h3 className="text-xl font-bold">Execution Roadmap</h3>
                                     </div>
                                 </div>
@@ -1792,7 +1868,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                             <Tooltip
                                                 contentStyle={{ backgroundColor: '#09090b', border: '1px solid #18181b', borderRadius: '16px', boxShadow: '0 20px 25px -5px rgb(0 0 0 / 0.5)' }}
                                                 itemStyle={{ color: '#fff', fontSize: '12px', fontWeight: 'bold' }}
-                                                formatter={(value: any) => [`${value}%`, 'Distribution']}
+                                                formatter={(value: any) => [`${Number(value)}%`, 'Distribution']}
                                             />
                                         </PieChart>
                                     </ResponsiveContainer>
@@ -1842,6 +1918,8 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                             icon={drilldownKpi.icon}
                             color={drilldownKpi.color}
                             kpiId={drilldownKpi.id}
+                            userId={effectiveUid ?? undefined}
+                            projectId={currentProject?.id}
                         />
                     )
                 }
@@ -1857,6 +1935,8 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                             title={drilldownKpi.label}
                             mappings={mappings}
                             color={drilldownKpi.color}
+                            userId={effectiveUid ?? undefined}
+                            projectId={currentProject?.id}
                         />
                     )
                 }
@@ -1871,6 +1951,8 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                             title={drilldownKpi.label}
                             label={drilldownKpi.summaryLabel || drilldownKpi.label.replace('Spend by ', '')}
                             color={drilldownKpi.color === 'rose' ? 'rose' : drilldownKpi.color === 'amber' ? 'amber' : 'primary'}
+                            userId={effectiveUid ?? undefined}
+                            projectId={currentProject?.id}
                         />
                     )
                 }

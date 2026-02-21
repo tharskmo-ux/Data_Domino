@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion } from 'framer-motion';
 import { X, Mail, Shield, UserPlus, Trash2, Check, ExternalLink, Users } from 'lucide-react';
 import { cn } from '../../lib/utils';
 

@@ -2,6 +2,10 @@ import React, { useState, useMemo } from 'react';
 import { X, Download, Search, ChevronUp, ChevronDown, Table, Database, Users } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { cn } from '../../lib/utils';
+import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
+import { db, storage } from '../../lib/firebase';
+import { useAdminView } from '../admin/AdminViewContext';
 
 interface SupplierSummaryDrilldownProps {
     isOpen: boolean;
@@ -11,6 +15,8 @@ interface SupplierSummaryDrilldownProps {
     title: string;
     mappings: Record<string, string>;
     color?: string;
+    userId?: string;
+    projectId?: string;
 }
 
 const SupplierSummaryDrilldown: React.FC<SupplierSummaryDrilldownProps> = ({
@@ -20,8 +26,11 @@ const SupplierSummaryDrilldown: React.FC<SupplierSummaryDrilldownProps> = ({
     totalSpend,
     title,
     mappings,
-    color = 'teal'
+    color = 'teal',
+    userId,
+    projectId,
 }) => {
+    const { isViewingClient } = useAdminView();
     const [searchQuery, setSearchQuery] = useState('');
     const [sortConfig, setSortConfig] = useState<{ key: string, direction: 'asc' | 'desc' }>({
         key: mappings['amount'],
@@ -93,7 +102,7 @@ const SupplierSummaryDrilldown: React.FC<SupplierSummaryDrilldownProps> = ({
         }).format(amount);
     };
 
-    const handleExport = () => {
+    const handleExport = async () => {
         if (filteredData.length === 0) return;
 
         const headers = ['Supplier', 'Category', 'Total Spend', '% of Total', 'Transactions'];
@@ -109,14 +118,38 @@ const SupplierSummaryDrilldown: React.FC<SupplierSummaryDrilldownProps> = ({
         ].join('\n');
 
         const blob = new Blob([`\uFEFF${csvContent}`], { type: 'text/csv;charset=utf-8' });
+        const exportFileName = `supplier_summary_${new Date().toISOString().split('T')[0]}.csv`;
+
+        // 1. Existing browser download — unchanged
         const url = URL.createObjectURL(blob);
         const link = document.createElement('a');
         link.setAttribute('href', url);
-        link.setAttribute('download', `supplier_summary_${new Date().toISOString().split('T')[0]}.csv`);
+        link.setAttribute('download', exportFileName);
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
         URL.revokeObjectURL(url);
+
+        // 2. Persist to Firebase Storage + Firestore (non-fatal, additive) — only if not in admin view mode
+        if (userId && db && storage && !isViewingClient) {
+            try {
+                const exportRef = ref(storage, `exports/${userId}/${Date.now()}_${exportFileName}`);
+                const exportSnapshot = await uploadBytes(exportRef, blob);
+                const exportDownloadUrl = await getDownloadURL(exportSnapshot.ref);
+
+                await addDoc(collection(db, 'exports'), {
+                    userId,
+                    projectId: projectId || '',
+                    fileName: exportFileName,
+                    fileUrl: exportDownloadUrl,
+                    filePath: exportSnapshot.ref.fullPath,
+                    exportedAt: serverTimestamp(),
+                    rowCount: filteredData.length,
+                });
+            } catch (err) {
+                console.error('[SupplierSummaryDrilldown Export Persist]', err);
+            }
+        }
     };
 
     if (!isOpen) return null;

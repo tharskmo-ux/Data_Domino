@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
 import { X, Save, Trash2, AlertTriangle, Loader2 } from 'lucide-react';
-import { cn } from '../../lib/utils';
 import type { Project } from './ProjectContext';
 
 interface ProjectSettingsModalProps {

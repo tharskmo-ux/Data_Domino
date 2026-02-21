@@ -6,12 +6,15 @@ import { useSubscription } from '../subscription/SubscriptionContext';
 import { auth, db } from '../../lib/firebase';
 import { signOut } from 'firebase/auth';
 import { doc, getDoc, updateDoc, setDoc, Timestamp } from 'firebase/firestore';
+import { useEffectiveUid } from '../../hooks/useEffectiveUid';
 import { ENALSYS_BOOKING_URL } from '../../lib/constants';
 import { motion } from 'framer-motion';
 import { useEffect } from 'react';
 
 const PlanSelectionPage: React.FC = () => {
-    const { user, planSelected } = useAuth();
+    const { user, isDemo, planSelected } = useAuth();
+    const effectiveUid = useEffectiveUid();
+    const { loading: subLoading, isSuspended } = useSubscription();
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const navigate = useNavigate();
@@ -25,13 +28,11 @@ const PlanSelectionPage: React.FC = () => {
         }
     };
 
-    const { loading: subLoading, isSuspended } = useSubscription();
-
     // Reactive redirect: Move to dashboard as soon as planSelected is synced and confirmed active
     useEffect(() => {
         // We only redirect if plan is selected AND subscription is loaded AND NOT suspended
         if (planSelected && !subLoading && !isSuspended) {
-            console.log("[PlanSelection] Plan active, redirecting to dashboard...");
+            // Redirect handled by PlanSelectionRoute usually, but defensive check
             navigate('/');
         }
     }, [planSelected, subLoading, isSuspended, navigate]);
@@ -42,15 +43,14 @@ const PlanSelectionPage: React.FC = () => {
     // 1. User hasn't selected a plan (Onboarding)
     // 2. Plan selected but trial exhausted (Post-onboarding restricted)
     // 3. Demo mode (for testing visibility)
-    const { isDemo } = useAuth();
     const showNavButtons = (!planSelected || isExhausted || isDemo);
 
     const handleStartTrial = async () => {
-        if (!user) return;
+        if (isDemo || !effectiveUid) return;
         setLoading(true);
         setError(null);
         try {
-            const roleRef = doc(db, 'user_roles', user.uid);
+            const roleRef = doc(db, 'user_roles', effectiveUid);
             const roleSnap = await getDoc(roleRef);
 
             if (roleSnap.exists()) {
@@ -59,12 +59,11 @@ const PlanSelectionPage: React.FC = () => {
                     planSelected: true
                 });
             } else {
-                // CREATE: Comply with 'request.resource.data.role == "trial"'
                 await setDoc(roleRef, {
                     role: 'trial',
                     planSelected: true,
-                    email: user.email,
-                    displayName: user.displayName || user.email?.split('@')[0] || 'User',
+                    email: user?.email,
+                    displayName: user?.displayName || user?.email?.split('@')[0] || 'User',
                     createdAt: Timestamp.now()
                 });
             }

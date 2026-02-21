@@ -1,0 +1,6 @@
+﻿src/features/etl/AnalyticsDashboard.tsx(844,27): error TS2304: Cannot find name 'Database'.
+src/features/etl/SupplierListModal.tsx(2,21): error TS6133: 'ArrowUpDown' is declared but its value is never read.
+src/features/etl/SupplierListModal.tsx(3,18): error TS6133: 'AnimatePresence' is declared but its value is never read.
+src/features/etl/SupplierListModal.tsx(4,1): error TS6133: 'cn' is declared but its value is never read.
+src/features/etl/TeamManagement.tsx(2,18): error TS6133: 'AnimatePresence' is declared but its value is never read.
+src/features/projects/ProjectSettingsModal.tsx(3,1): error TS6133: 'cn' is declared but its value is never read.

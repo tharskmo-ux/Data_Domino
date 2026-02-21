@@ -246,6 +246,8 @@ const AdminDashboard = () => {
             uid: u.uid,
             email: u.email,
             displayName: u.displayName,
+            role: u.role as 'admin' | 'enterprise' | 'trial',
+            subType: u.subType as 'FREE' | 'ENTERPRISE'
         });
         navigate('/');
     };

@@ -4,6 +4,8 @@ interface ViewingClient {
     uid: string;
     email: string;
     displayName: string;
+    role: 'admin' | 'enterprise' | 'trial';
+    subType: 'FREE' | 'ENTERPRISE';
 }
 
 interface AdminViewContextType {
@@ -23,13 +25,33 @@ const AdminViewContext = createContext<AdminViewContextType>({
 export const useAdminView = () => useContext(AdminViewContext);
 
 export const AdminViewProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-    const [viewingClient, setViewingClient] = useState<ViewingClient | null>(null);
+    const [viewingClient, setViewingClient] = useState<ViewingClient | null>(() => {
+        const saved = sessionStorage.getItem('admin_viewing_client');
+        if (saved) {
+            try {
+                return JSON.parse(saved);
+            } catch {
+                return null;
+            }
+        }
+        return null;
+    });
+
+    const startViewingClient = (client: ViewingClient) => {
+        setViewingClient(client);
+        sessionStorage.setItem('admin_viewing_client', JSON.stringify(client));
+    };
+
+    const stopViewingClient = () => {
+        setViewingClient(null);
+        sessionStorage.removeItem('admin_viewing_client');
+    };
 
     return (
         <AdminViewContext.Provider value={{
             viewingClient,
-            startViewingClient: (client) => setViewingClient(client),
-            stopViewingClient: () => setViewingClient(null),
+            startViewingClient,
+            stopViewingClient,
             isViewingClient: viewingClient !== null,
         }}>
             {children}

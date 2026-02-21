@@ -1,64 +1,64 @@
 import React, { useEffect, useState } from 'react';
-import { collection, query, where, getDocs } from 'firebase/firestore';
-import { ref, getDownloadURL } from 'firebase/storage';
-import { db, storage } from '../../lib/firebase';
+import { collection, query, where, onSnapshot, orderBy } from 'firebase/firestore';
+import { db } from '../../lib/firebase';
 import { useAdminView } from './AdminViewContext';
 import { useAuth } from '../auth/AuthContext';
-import { Download, FileText, FolderOpen, Loader2 } from 'lucide-react';
+import { Download, FileText, FolderOpen } from 'lucide-react';
 
-interface ClientFile {
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+interface UploadRecord {
     id: string;
-    filename: string;
-    date: string;
-    size?: number;
-    storagePath?: string;
+    fileName: string;
+    uploadedAt: any; // Firestore Timestamp
+    rowCount?: number;
+    totalSpend?: number;
+    savingsPotentialMin?: number;
+    savingsPotentialMax?: number;
+    duplicateCount?: number;
+    fileUrl?: string;
+    fileSizeMB?: number;
 }
 
-const FileRow: React.FC<{ file: ClientFile }> = ({ file }) => {
-    const [downloading, setDownloading] = useState(false);
+interface ExportRecord {
+    id: string;
+    fileName: string;
+    exportedAt: any; // Firestore Timestamp
+    fileUrl?: string;
+}
 
-    const handleDownload = async () => {
-        if (!file.storagePath || !storage) return;
-        try {
-            setDownloading(true);
-            const url = await getDownloadURL(ref(storage, file.storagePath));
-            window.open(url, '_blank');
-        } catch (e) {
-            console.error('Download failed', e);
-        } finally {
-            setDownloading(false);
-        }
-    };
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
-    return (
-        <div className="flex items-center justify-between p-4 bg-zinc-900/50 rounded-xl border border-zinc-800 hover:border-zinc-700 transition-all">
-            <div className="flex items-center gap-3">
-                <div className="w-8 h-8 rounded-lg bg-zinc-800 flex items-center justify-center shrink-0">
-                    <FileText className="h-4 w-4 text-zinc-400" />
-                </div>
-                <div>
-                    <p className="text-sm font-bold text-zinc-200 truncate max-w-xs">{file.filename}</p>
-                    <div className="flex items-center gap-3 mt-0.5">
-                        <span className="text-[10px] text-zinc-500 font-medium">{file.date}</span>
-                        {file.size && (
-                            <span className="text-[10px] text-zinc-600">{(file.size / 1024).toFixed(1)} KB</span>
-                        )}
-                    </div>
-                </div>
-            </div>
-            {file.storagePath && (
-                <button
-                    onClick={handleDownload}
-                    disabled={downloading}
-                    className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-lg text-xs font-bold transition-all border border-zinc-700 hover:border-zinc-600 disabled:opacity-50"
-                >
-                    {downloading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
-                    Download
-                </button>
-            )}
-        </div>
-    );
+const fmtDate = (ts: any) => {
+    if (!ts) return '—';
+    const d = ts.toDate ? ts.toDate() : new Date(ts);
+    return d.toLocaleDateString();
 };
+
+const fmtCurrency = (v?: number) => {
+    if (v == null) return null;
+    return new Intl.NumberFormat('en-IN', {
+        style: 'currency',
+        currency: 'INR',
+        maximumSignificantDigits: 4,
+        notation: 'compact',
+    }).format(v);
+};
+
+// ─── Sub-components ───────────────────────────────────────────────────────────
+
+const SkeletonRow = () => (
+    <div className="flex items-center justify-between p-4 bg-zinc-900/50 rounded-xl border border-zinc-800 animate-pulse">
+        <div className="flex items-center gap-3 flex-1">
+            <div className="w-8 h-8 rounded-lg bg-zinc-800 shrink-0" />
+            <div className="space-y-1.5 flex-1">
+                <div className="h-3 bg-zinc-800 rounded w-2/5" />
+                <div className="h-2.5 bg-zinc-800/70 rounded w-1/4" />
+            </div>
+        </div>
+        <div className="h-7 w-24 bg-zinc-800 rounded-lg" />
+    </div>
+);
 
 const EmptyState: React.FC<{ label: string }> = ({ label }) => (
     <div className="p-8 text-center bg-zinc-900/30 border border-zinc-800 rounded-xl">
@@ -67,103 +67,194 @@ const EmptyState: React.FC<{ label: string }> = ({ label }) => (
     </div>
 );
 
+const UploadRow: React.FC<{ record: UploadRecord }> = ({ record }) => (
+    <div className="flex items-center justify-between p-4 bg-zinc-900/50 rounded-xl border border-zinc-800 hover:border-zinc-700 transition-all gap-4">
+        <div className="flex items-center gap-3 min-w-0">
+            <div className="w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center shrink-0">
+                <FileText className="h-4 w-4 text-emerald-400" />
+            </div>
+            <div className="min-w-0">
+                <p className="text-sm font-bold text-zinc-200 truncate max-w-[200px]">{record.fileName}</p>
+                <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                    <span className="text-[10px] text-zinc-500 font-medium">{fmtDate(record.uploadedAt)}</span>
+                    {record.rowCount != null && (
+                        <span className="text-[10px] font-semibold text-zinc-400 bg-zinc-800 px-1.5 py-0.5 rounded">
+                            {record.rowCount.toLocaleString()} rows
+                        </span>
+                    )}
+                    {record.totalSpend != null && (
+                        <span className="text-[10px] font-semibold text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded">
+                            {fmtCurrency(record.totalSpend)}
+                        </span>
+                    )}
+                    {record.savingsPotentialMin != null && record.savingsPotentialMax != null && (
+                        <span className="text-[10px] font-semibold text-amber-400 bg-amber-500/10 px-1.5 py-0.5 rounded">
+                            Savings {fmtCurrency(record.savingsPotentialMin)}–{fmtCurrency(record.savingsPotentialMax)}
+                        </span>
+                    )}
+                    {record.duplicateCount != null && record.duplicateCount > 0 && (
+                        <span className="text-[10px] font-semibold text-rose-400 bg-rose-500/10 px-1.5 py-0.5 rounded">
+                            {record.duplicateCount} dupes
+                        </span>
+                    )}
+                </div>
+            </div>
+        </div>
+        <button
+            onClick={() => record.fileUrl && window.open(record.fileUrl, '_blank')}
+            disabled={!record.fileUrl}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-lg text-xs font-bold transition-all border border-zinc-700 hover:border-zinc-600 disabled:opacity-40 shrink-0"
+        >
+            <Download className="h-3 w-3" /> Download Original
+        </button>
+    </div>
+);
+
+const ExportRow: React.FC<{ record: ExportRecord }> = ({ record }) => (
+    <div className="flex items-center justify-between p-4 bg-zinc-900/50 rounded-xl border border-zinc-800 hover:border-zinc-700 transition-all gap-4">
+        <div className="flex items-center gap-3 min-w-0">
+            <div className="w-8 h-8 rounded-lg bg-blue-500/10 border border-blue-500/20 flex items-center justify-center shrink-0">
+                <Download className="h-4 w-4 text-blue-400" />
+            </div>
+            <div className="min-w-0">
+                <p className="text-sm font-bold text-zinc-200 truncate max-w-[200px]">{record.fileName}</p>
+                <span className="text-[10px] text-zinc-500 font-medium">{fmtDate(record.exportedAt)}</span>
+            </div>
+        </div>
+        <button
+            onClick={() => record.fileUrl && window.open(record.fileUrl, '_blank')}
+            disabled={!record.fileUrl}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-lg text-xs font-bold transition-all border border-zinc-700 hover:border-zinc-600 disabled:opacity-40 shrink-0"
+        >
+            <Download className="h-3 w-3" /> Download Export
+        </button>
+    </div>
+);
+
+// ─── Main Component ───────────────────────────────────────────────────────────
+
 const ClientFilesPanel: React.FC = () => {
-    const { isAdmin } = useAuth();
+    const { role } = useAuth();
     const { isViewingClient, viewingClient } = useAdminView();
-    const [uploads, setUploads] = useState<ClientFile[]>([]);
-    const [exports, setExports] = useState<ClientFile[]>([]);
+    const effectiveUid = useAuth().user?.uid;
+
+    // In admin view, effectiveUid needs to point to the client, but useAuth provides the admin.
+    // Let's use a safe fallback: if viewing client, use that, otherwise use own auth uid.
+    const uidToQuery = (isViewingClient && viewingClient) ? viewingClient.uid : effectiveUid;
+
+    const [uploads, setUploads] = useState<UploadRecord[]>([]);
+    const [exports, setExports] = useState<ExportRecord[]>([]);
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
-        // Safety: only load when admin is actively viewing a client
-        if (!isAdmin || !isViewingClient || !viewingClient) return;
+        if (!uidToQuery) return;
 
-        const fetchFiles = async () => {
-            setLoading(true);
-            try {
-                // Section A: Input files (uploads)
-                const uploadsQuery = query(
-                    collection(db, 'uploads'),
-                    where('userId', '==', viewingClient.uid)
-                );
-                const uploadsSnap = await getDocs(uploadsQuery);
-                setUploads(uploadsSnap.docs.map(d => ({
-                    id: d.id,
-                    filename: d.data().filename || d.data().name || 'Unnamed File',
-                    date: d.data().uploadedAt?.toDate?.().toLocaleDateString() ||
-                        d.data().createdAt?.toDate?.().toLocaleDateString() || '—',
-                    size: d.data().size,
-                    storagePath: d.data().storagePath,
-                })));
+        const uploadsQuery = query(
+            collection(db, 'uploads'),
+            where('userId', '==', uidToQuery),
+            orderBy('uploadedAt', 'desc')
+        );
 
-                // Section B: Output files (exports)
-                const exportsQuery = query(
-                    collection(db, 'exports'),
-                    where('userId', '==', viewingClient.uid)
-                );
-                const exportsSnap = await getDocs(exportsQuery);
-                setExports(exportsSnap.docs.map(d => ({
-                    id: d.id,
-                    filename: d.data().filename || d.data().name || 'Exported File',
-                    date: d.data().exportedAt?.toDate?.().toLocaleDateString() ||
-                        d.data().createdAt?.toDate?.().toLocaleDateString() || '—',
-                    storagePath: d.data().storagePath,
-                })));
-            } catch (e) {
-                console.error('ClientFilesPanel: fetch error', e);
-            } finally {
-                setLoading(false);
-            }
+        const exportsQuery = query(
+            collection(db, 'exports'),
+            where('userId', '==', uidToQuery),
+            orderBy('exportedAt', 'desc')
+        );
+
+        const unsubUploads = onSnapshot(uploadsQuery, (snap) => {
+            const uDocs = snap.docs.map(doc => ({
+                id: doc.id,
+                fileName: doc.data().fileName || 'Unnamed File',
+                uploadedAt: doc.data().uploadedAt,
+                rowCount: doc.data().rowCount,
+                totalSpend: doc.data().totalSpend,
+                savingsPotentialMin: doc.data().savingsPotentialMin,
+                savingsPotentialMax: doc.data().savingsPotentialMax,
+                duplicateCount: doc.data().duplicateCount,
+                fileUrl: doc.data().fileUrl,
+                fileSizeMB: doc.data().fileSizeMB,
+            }));
+            setUploads(uDocs);
+            setLoading(false);
+        }, (err) => {
+            console.error('[ClientFilesPanel] uploads listener error:', err);
+            setLoading(false);
+        });
+
+        const unsubExports = onSnapshot(exportsQuery, (snap) => {
+            const eDocs = snap.docs.map(doc => ({
+                id: doc.id,
+                fileName: doc.data().fileName || 'Exported File',
+                exportedAt: doc.data().exportedAt,
+                fileUrl: doc.data().fileUrl,
+            }));
+            setExports(eDocs);
+            setLoading(false);
+        }, (err) => {
+            console.error('[ClientFilesPanel] exports listener error:', err);
+            setLoading(false);
+        });
+
+        return () => {
+            unsubUploads();
+            unsubExports();
         };
+    }, [uidToQuery]);
 
-        fetchFiles();
-    }, [isAdmin, isViewingClient, viewingClient]);
+    // Trial users are not permitted to see/download original raw inputs/outputs to prevent abuse
+    if (role === 'trial') return null;
 
-    // Never render for non-admins or when not in client view
-    if (!isAdmin || !isViewingClient) return null;
+    // Safety check map
+    if (!uidToQuery) return null;
+
+    const SKELETON_COUNT = 3;
+    const isImpersonating = isViewingClient && viewingClient;
 
     return (
         <div className="mt-8 space-y-8">
             <div className="border-t border-zinc-800 pt-8">
                 <h2 className="text-lg font-black text-zinc-200 mb-1">
-                    Client Files — <span className="text-primary">{viewingClient?.displayName}</span>
+                    {isImpersonating ? (
+                        <>Client Files — <span className="text-primary">{viewingClient.displayName}</span></>
+                    ) : (
+                        <>Your Uploaded Data & Exports</>
+                    )}
                 </h2>
-                <p className="text-zinc-500 text-xs mb-6 font-medium">Read-only. No changes can be made in admin view mode.</p>
+                <p className="text-zinc-500 text-xs mb-6 font-medium">
+                    {isImpersonating ? 'Read-only. No changes can be made in admin view mode.' : 'Access your historical raw data inputs and processed output files.'}
+                </p>
 
-                {loading ? (
-                    <div className="flex items-center gap-3 text-zinc-500 py-8">
-                        <Loader2 className="h-5 w-5 animate-spin" />
-                        <span className="text-sm font-medium">Fetching client files...</span>
-                    </div>
-                ) : (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                        {/* Section A: Input Files */}
-                        <div>
-                            <h3 className="text-xs font-black uppercase tracking-widest text-zinc-500 mb-3">
-                                Input Files (Uploads)
-                            </h3>
-                            <div className="space-y-2">
-                                {uploads.length === 0
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                    {/* Section A: Input Files (Uploads) */}
+                    <div>
+                        <h3 className="text-xs font-black uppercase tracking-widest text-zinc-500 mb-3">
+                            Input Files (Uploads)
+                        </h3>
+                        <div className="space-y-2">
+                            {loading
+                                ? Array.from({ length: SKELETON_COUNT }).map((_, i) => <SkeletonRow key={i} />)
+                                : uploads.length === 0
                                     ? <EmptyState label="No files uploaded yet." />
-                                    : uploads.map(f => <FileRow key={f.id} file={f} />)
-                                }
-                            </div>
-                        </div>
-
-                        {/* Section B: Output Files */}
-                        <div>
-                            <h3 className="text-xs font-black uppercase tracking-widest text-zinc-500 mb-3">
-                                Output Files (Exports)
-                            </h3>
-                            <div className="space-y-2">
-                                {exports.length === 0
-                                    ? <EmptyState label="No exported files yet." />
-                                    : exports.map(f => <FileRow key={f.id} file={f} />)
-                                }
-                            </div>
+                                    : uploads.map(u => <UploadRow key={u.id} record={u} />)
+                            }
                         </div>
                     </div>
-                )}
+
+                    {/* Section B: Output Files (Exports) */}
+                    <div>
+                        <h3 className="text-xs font-black uppercase tracking-widest text-zinc-500 mb-3">
+                            Output Files (Exports)
+                        </h3>
+                        <div className="space-y-2">
+                            {loading
+                                ? Array.from({ length: SKELETON_COUNT }).map((_, i) => <SkeletonRow key={i} />)
+                                : exports.length === 0
+                                    ? <EmptyState label="No exported files yet." />
+                                    : exports.map(e => <ExportRow key={e.id} record={e} />)
+                            }
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
     );

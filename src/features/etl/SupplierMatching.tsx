@@ -46,7 +46,7 @@ const SupplierMatching: React.FC<SupplierMatchingProps> = ({ onComplete, data, m
 
             if (!clusters[normalizedName]) {
                 clusters[normalizedName] = {
-                    id: `grp-${Math.random().toString(36).substr(2, 5)}`,
+                    id: `grp-${crypto.randomUUID().split('-')[0]}`,
                     masterName: rawName,
                     variants: [rawName],
                     confidence: 'High',
@@ -92,7 +92,7 @@ const SupplierMatching: React.FC<SupplierMatchingProps> = ({ onComplete, data, m
     };
 
     const handleSplit = (groupId: string, variantName: string) => {
-        const groupToken = Math.random().toString(36).substr(2, 5);
+        const groupToken = crypto.randomUUID().split('-')[0];
         const newGroupId = `split-${groupToken}`;
 
         setGroups(prev => {

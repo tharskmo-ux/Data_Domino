@@ -153,13 +153,13 @@ const DataProfiling: React.FC<DataProfilingProps> = ({ data, headers, normalizat
                                 <Tooltip
                                     contentStyle={{ backgroundColor: '#09090b', border: '1px solid #18181b', borderRadius: '12px' }}
                                     itemStyle={{ fontSize: '12px' }}
-                                    formatter={(value: any) => [`${value}%`, 'Fill Rate']}
+                                    formatter={(value: any) => [`${Number(value)}%`, 'Fill Rate']}
                                 />
                                 <Bar dataKey="fillRate" radius={[0, 4, 4, 0]} barSize={12}>
                                     {profile.stats.map((entry, index) => (
                                         <Cell key={`cell-${index}`} fill={entry.fillRate > 80 ? '#14b8a6' : entry.fillRate > 50 ? '#f59e0b' : '#f43f5e'} />
                                     ))}
-                                    <LabelList dataKey="fillRate" position="right" fill="#fff" fontSize={10} fontWeight="bold" formatter={(val: any) => `${val}%`} />
+                                    <LabelList dataKey="fillRate" position="right" fill="#fff" fontSize={10} fontWeight="bold" formatter={(val: any) => `${Number(val)}%`} />
                                 </Bar>
                             </BarChart>
                         </ResponsiveContainer>
