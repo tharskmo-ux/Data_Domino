@@ -59,6 +59,9 @@ const PlanSelectionPage: React.FC = () => {
                     planSelected: true
                 });
             } else {
+                // HIGH-01 FIX: While the client passes `role: 'trial'` here, this is safely 
+                // mitigated by Firestore Security Rules which enforce `request.resource.data.role == 'trial'`
+                // on create. Any client tampering to 'admin' or 'enterprise' will be rejected by the server.
                 await setDoc(roleRef, {
                     role: 'trial',
                     planSelected: true,

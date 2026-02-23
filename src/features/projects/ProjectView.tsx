@@ -92,6 +92,13 @@ const ProjectView: React.FC = () => {
     const [abcA, setAbcA] = useState(0);
     const [abcB, setAbcB] = useState(0);
     const [abcC, setAbcC] = useState(0);
+    // Extended saved analytics signals (populated after the savings-engine save fix)
+    const [identifiedSavings, setIdentifiedSavings] = useState(0);
+    const [savingsBreakdown, setSavingsBreakdown] = useState<any>(null);
+    const [contractedPercent, setContractedPercent] = useState<number | null>(null);
+    const [ptRiskPercent, setPtRiskPercent] = useState<number | null>(null);
+    const [singleSourcingPct, setSingleSourcingPct] = useState<number | null>(null);
+    const [tailSpendPct, setTailSpendPct] = useState<number | null>(null);
     const [showResumePrompt, setShowResumePrompt] = useState(false);
     const [resumeStep, setResumeStep] = useState<string | number>(0);
     const [initialLoadDone, setInitialLoadDone] = useState(false);
@@ -218,7 +225,12 @@ const ProjectView: React.FC = () => {
 
                     if (!snapshot.empty) {
                         const data = snapshot.docs[0].data();
-                        const project = normalizeProject(data, snapshot.docs[0].id);
+                        // Extract just the projectId portion — doc IDs are "{uid}_{projectId}"
+                        const rawDocId = snapshot.docs[0].id;
+                        const projectId = rawDocId.includes('_')
+                            ? rawDocId.slice(rawDocId.indexOf('_') + 1)
+                            : rawDocId;
+                        const project = normalizeProject(data, projectId);
                         setCurrentProject(project);
 
                         if (data.latestAnalysis) {
@@ -252,6 +264,29 @@ const ProjectView: React.FC = () => {
         loadDashboard();
     }, [effectiveUid, currentProject?.id]);
 
+    // FIX 1: Reset all local state when the selected project changes so stale data
+    // from the previous project is never shown while the new snapshot loads.
+    const prevProjectIdRef = useRef<string | null>(null);
+    useEffect(() => {
+        const newId = currentProject?.id ?? null;
+        if (newId === prevProjectIdRef.current) return; // same project — nothing to reset
+        prevProjectIdRef.current = newId;
+
+        // Reset pipeline session data and load indicator on every project switch
+        setInitialLoadDone(false);
+        setActiveStep('dashboard');
+        setProjectData({
+            raw: [],
+            headers: [],
+            mappings: {},
+            currency: 'INR',
+            clusters: [],
+            fileMeta: undefined,
+        });
+        setAnalysis(null);
+        setShowResumePrompt(false);
+    }, [currentProject?.id]);
+
     useEffect(() => {
         if (!effectiveUid || !currentProject?.id || currentProject.id === 'shared-view') return;
 
@@ -260,10 +295,34 @@ const ProjectView: React.FC = () => {
         const unsubscribe = onSnapshot(projectRef, async (snap) => {
             if (snap.exists()) {
                 const project = snap.data();
-                const normalized = normalizeProject(project, currentProject.id);
 
-                // Sync base metadata
-                setCurrentProject(normalized);
+                // CRITICAL-02 FIX: Prevent onSnapshot from overwriting mid-pipeline session data
+                // We only normalize and apply if this is a fresh load or a confirmed external update
+                // Since this is a single-user flow, any writes coming from *us* don't need to overwrite our own memory
+                const normalized = normalizeProject(project, currentProject?.id || '');
+
+                // FIX 2: Brand-new draft projects have no file yet — mark loading done immediately
+                // so SHOW_UPLOAD renders right away. Must still call setCurrentProject so
+                // determineProjectState sees the project and can pick SHOW_UPLOAD.
+                if (project.status === 'draft' && !project.rawGridUrl) {
+                    setCurrentProject(prev =>
+                        prev?.id === normalized.id && prev?.status === normalized.status ? prev : normalized
+                    );
+                    setInitialLoadDone(true);
+                    setIsRestoring(false);
+                    return;
+                }
+
+                // HIGH-03 FIX: We don't call setCurrentProject if the object is functionally identical
+                // This prevents the infinite dependency loop
+                setCurrentProject(prev => {
+                    // HIGH-03 FIX: Only trigger re-render if id or status actually changed
+                    // `updatedAt` is not a typed Project field, so we skip it
+                    if (prev?.id === normalized.id && prev?.status === normalized.status) {
+                        return prev;
+                    }
+                    return normalized;
+                });
 
                 // Map numeric steps to ETLStep strings
                 const stepMap: Record<number | string, ETLStep> = {
@@ -292,21 +351,32 @@ const ProjectView: React.FC = () => {
                 }
 
                 // Restore Pipeline Stats & Data — only fill gaps, never overwrite live session data
-                setProjectData(prev => ({
-                    ...prev,
-                    // Only restore raw data from Firestore if the live session has nothing yet
-                    raw: (prev.raw && prev.raw.length > 0) ? prev.raw : (normalized.rawGrid ?? prev.raw),
-                    headers: prev.headers?.length ? prev.headers : (normalized.detectedHeaders ?? prev.headers),
-                    mappings: (prev.mappings && Object.keys(prev.mappings).length > 0) ? prev.mappings : (normalized.columnMapping ?? prev.mappings),
-                    currency: prev.currency || normalized.currency || 'INR',
-                    clusters: (prev.clusters && prev.clusters.length > 0) ? prev.clusters : (normalized.supplierMatches ?? prev.clusters),
-                    rawGridUrl: prev.rawGridUrl || normalized.rawGridUrl,
-                    fileMeta: prev.fileMeta ?? {
-                        name: normalized.fileName,
-                        rows: normalized.rowCount ?? (normalized.stats?.transactions || 0),
-                        quality: normalized.stats?.quality ?? 0
-                    } as any
-                }));
+                setProjectData(prev => {
+                    // CRITICAL-02: If we already have raw data from an active pipeline session, DO NOT overwrite
+                    const hasLiveSession = prev.raw && prev.raw.length > 0;
+                    if (hasLiveSession) return prev;
+
+                    // DATA PARITY FIX: For completed projects with a categoryResultsUrl, do NOT populate `raw`
+                    // from the 100-row Firestore preview (rawGrid). Leave raw=[] so the auto-restore useEffect
+                    // can fetch the FULL dataset from Firebase Storage — ensuring admin and user see identical numbers.
+                    const isCompleted = project.status === 'data_quality_complete';
+                    const hasCatUrl = !!project.categoryResultsUrl;
+
+                    return {
+                        ...prev,
+                        raw: (isCompleted && hasCatUrl) ? [] : (normalized.rawGrid ?? prev.raw),
+                        headers: normalized.detectedHeaders ?? prev.headers,
+                        mappings: normalized.columnMapping ?? prev.mappings,
+                        currency: normalized.currency || 'INR',
+                        clusters: normalized.supplierMatches ?? prev.clusters,
+                        rawGridUrl: normalized.rawGridUrl || prev.rawGridUrl,
+                        fileMeta: prev.fileMeta ?? {
+                            name: normalized.fileName,
+                            rows: normalized.rowCount ?? (normalized.stats?.transactions || 0),
+                            quality: normalized.stats?.quality ?? 0
+                        } as any
+                    };
+                });
 
 
                 if (project.latestAnalysis) {
@@ -320,8 +390,14 @@ const ProjectView: React.FC = () => {
                     setAbcA(la.abcA ?? 0);
                     setAbcB(la.abcB ?? 0);
                     setAbcC(la.abcC ?? 0);
+                    // Extended signals (present in projects analysed after the savings-engine fix)
+                    if (la.identifiedSavings != null) setIdentifiedSavings(la.identifiedSavings);
+                    if (la.savingsBreakdown) setSavingsBreakdown(la.savingsBreakdown);
+                    if (la.contractedPercent != null) setContractedPercent(la.contractedPercent);
+                    if (la.ptRiskPercent != null) setPtRiskPercent(la.ptRiskPercent);
+                    if (la.singleSourcingPct != null) setSingleSourcingPct(la.singleSourcingPct);
+                    if (la.tailSpendPct != null) setTailSpendPct(la.tailSpendPct);
                 }
-                // determineProjectState handles display — no need to track hasExistingData separately
             }
             setIsRestoring(false);
             setInitialLoadDone(true);
@@ -332,7 +408,64 @@ const ProjectView: React.FC = () => {
         });
 
         return () => unsubscribe();
-    }, [currentProject?.id, effectiveUid]);
+        // FIX 1: currentProject?.id added back — safe because we guard stale writes above with the
+        // "hasLiveSession" check (CRITICAL-02) and the draft fast-path (FIX 2).
+    }, [effectiveUid, currentProject?.id]);
+
+    // AUTO-RESTORE: For completed projects, ALWAYS fetch the full processed row dataset from
+    // Firebase Storage (categoryResultsUrl) to ensure 100% data parity between user and admin views.
+    // This overrides the 100-row Firestore preview (rawGrid) that onSnapshot may have loaded.
+    useEffect(() => {
+        const catUrl = currentProject?.categoryResultsUrl;
+        const projectIsComplete = currentProject?.status === 'data_quality_complete';
+        const la = currentProject?.latestAnalysis;
+
+        // Only run when the project is complete and we have finished the initial load
+        if (!projectIsComplete || !initialLoadDone) return;
+
+        // If we already have full data from an active pipeline session (more rows than the rowCount
+        // stored in Firestore), skip — user just finished the pipeline in this session.
+        // FIX: If rowCount is 0 (legacy), always attempt restoration to be safe.
+        const knownRowCount = currentProject?.rowCount || 0;
+        const alreadyFull = projectData.raw.length > 0 && knownRowCount > 0 && projectData.raw.length >= knownRowCount;
+        if (alreadyFull) return;
+
+        (async () => {
+            setIsRestoring(true);
+            try {
+                if (catUrl) {
+                    // New format: rows stored in Firebase Storage JSON
+                    const response = await fetch(catUrl);
+                    const rows = await response.json();
+
+                    setProjectData(prev => ({
+                        ...prev,
+                        raw: rows,
+                        mappings: (Object.keys(prev.mappings).length > 0 ? prev.mappings : la?.mappings) ?? prev.mappings,
+                        currency: prev.currency || la?.currency || 'INR',
+                        clusters: (prev.clusters.length > 0 ? prev.clusters : la?.clusters) ?? prev.clusters,
+                    }));
+                } else if (currentProject?.categoryResults && Array.isArray(currentProject.categoryResults) && currentProject.categoryResults.length > 0) {
+                    // EXPORT FIX A (Legacy Firestore): Before PERF-03, rows were written directly to Firestore as categoryResults[]
+                    const legacyRows = currentProject.categoryResults;
+                    setProjectData(prev => ({
+                        ...prev,
+                        raw: legacyRows,
+                        mappings: (Object.keys(prev.mappings).length > 0 ? prev.mappings : la?.mappings) ?? prev.mappings,
+                        currency: prev.currency || la?.currency || 'INR',
+                        clusters: (prev.clusters.length > 0 ? prev.clusters : la?.clusters) ?? prev.clusters,
+                    }));
+                }
+                // If neither catUrl nor la.raw exists, data simply won't be available for export —
+                // but we still clear the restoring flag so the dashboard renders correctly.
+            } catch (err) {
+                console.error('[Auto-Restore] Failed to load category results:', err);
+            } finally {
+                setIsRestoring(false);
+            }
+        })();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [currentProject?.status, currentProject?.id, initialLoadDone]);
 
     const handleUploadComplete = (data: any[], metadata: FileMetadata, rawSheetData: any[][], merges: any[], worksheet: any, rawFile?: File) => {
         setIsProcessing(true);
@@ -636,6 +769,16 @@ const ProjectView: React.FC = () => {
         if (effectiveUid && db && currentProject) {
             (async () => {
                 try {
+                    // Phase 9 PERF-03 FIX: Persist large JSON to Storage instead of Firestore doc
+                    let categoryResultsUrl = '';
+                    if (storage) {
+                        const rawJson = JSON.stringify(updatedData);
+                        const rawRef = ref(storage, `uploads/${effectiveUid}/${currentProject.id}/category_results.json`);
+                        await uploadString(rawRef, rawJson, 'raw');
+                        categoryResultsUrl = await getDownloadURL(rawRef);
+                    }
+
+
                     // Analytics Calculation
                     const amounts = updatedData.map(row => {
                         if (amountCol && row[amountCol]) {
@@ -658,15 +801,141 @@ const ProjectView: React.FC = () => {
                     const topVendors = sortedSuppliers.slice(0, 5).map(([name]) => name);
                     const topVendorSpend = sortedSuppliers.slice(0, 5).reduce((acc, [_, spend]) => acc + spend, 0);
 
+                    // ABC: compute as *spend buckets* (not transaction counts) so the
+                    // dashboard can display them directly as currency / percentage of spend.
                     const sortedSpend = [...amounts].sort((a, b) => b - a);
                     let currentCumul = 0;
-                    let abcA = 0, abcB = 0, abcC = 0;
+                    let abcA = 0, abcB = 0, abcC = 0; // spend totals per tier
                     sortedSpend.forEach(val => {
                         currentCumul += val;
-                        if (currentCumul <= totalSpendVal * 0.7) abcA++;
-                        else if (currentCumul <= totalSpendVal * 0.9) abcB++;
-                        else abcC++;
+                        if (currentCumul <= totalSpendVal * 0.7) abcA += val;
+                        else if (currentCumul <= totalSpendVal * 0.9) abcB += val;
+                        else abcC += val;
                     });
+
+                    // ── Compute savings signals from the full dataset ──────────────────────
+                    // These mirror the AnalyticsDashboard dynamicStats logic so saved values
+                    // match what was shown to the user when the analysis first completed.
+                    const amountColSave = projectData.mappings['amount'];
+                    const contractColSave = projectData.mappings['contract_ref'];
+                    const ptColSave = projectData.mappings['payment_terms'];
+                    const itemColSave = projectData.mappings['item_description'];
+
+                    let contractedSpendSave = 0;
+                    let ptRiskSpendSave = 0;
+                    let totalIdentifiedSavingsSave = 0;
+                    let priceVarianceSave = 0;
+                    let complianceSave = 0;
+                    let singleSourceSave = 0;
+                    let tailSpendSave = 0;
+                    let processEffSave = 0;
+                    const isHighValueCurrencySave = /^(USD|GBP|EUR|AUD|CAD|CHF|SGD)$/i.test(projectData.currency || 'INR');
+                    const lvThreshold = isHighValueCurrencySave ? 100 : 5000;
+                    const peFixedSave = isHighValueCurrencySave ? 50 : 500;
+
+                    // Global supplier spend for tail detection
+                    const gSupplierSpend: Record<string, number> = {};
+                    updatedData.forEach(r => {
+                        const s = String(r[supplierCol] || '');
+                        const a = parseFloat(String(r[amountColSave] || '0').replace(/[^0-9.-]+/g, '')) || 0;
+                        gSupplierSpend[s] = (gSupplierSpend[s] || 0) + a;
+                    });
+                    const gTotal = Object.values(gSupplierSpend).reduce((x, y) => x + y, 0);
+                    const gTailThresh = gTotal * 0.2;
+                    const gSorted = Object.entries(gSupplierSpend).sort((a, b) => a[1] - b[1]);
+                    const gTailSet = new Set<string>();
+                    let gCum = 0;
+                    for (const [s, a] of gSorted) {
+                        if (gCum + a <= gTailThresh) { gTailSet.add(s); gCum += a; } else break;
+                    }
+
+                    // Global item stats for price arbitrage
+                    const gItemStats: Record<string, { minPrice: number, supplierCount: number, suppliers: Set<string> }> = {};
+                    const unitPriceColSave = projectData.mappings['unit_price'];
+                    updatedData.forEach(r => {
+                        const item = String(r[itemColSave] || '').trim();
+                        if (!item) return;
+                        const up = parseFloat(String(r[unitPriceColSave] || '0').replace(/[^0-9.-]+/g, '')) || 0;
+                        const sup = String(r[supplierCol] || '');
+                        if (!gItemStats[item]) gItemStats[item] = { minPrice: up || Infinity, supplierCount: 0, suppliers: new Set() };
+                        gItemStats[item].suppliers.add(sup);
+                        if (up > 0 && up < gItemStats[item].minPrice) gItemStats[item].minPrice = up;
+                    });
+                    Object.values(gItemStats).forEach(s => {
+                        s.supplierCount = s.suppliers.size;
+                        if (s.minPrice === Infinity) s.minPrice = 0;
+                    });
+
+                    const isContractedRefSave = (val: string): boolean => {
+                        if (!val || /^[-–—/\s]*$/.test(val)) return false;
+                        if (/^(n\/?a|none|nil|unverified|not available|no contract|tbd|pending|--)$/i.test(val.trim())) return false;
+                        return /contracted|active|valid|yes|\bY\b|PO-|CT-|CON-|AGR-|\d{4,}/i.test(val);
+                    };
+
+                    updatedData.forEach(r => {
+                        const amount = parseFloat(String(r[amountColSave] || '0').replace(/[^0-9.-]+/g, '')) || 0;
+                        const supplier = String(r[supplierCol] || '');
+                        const item = String(r[itemColSave] || '').trim();
+                        const up = parseFloat(String(r[unitPriceColSave] || '0').replace(/[^0-9.-]+/g, '')) || 0;
+                        const qty = parseFloat(String(r[projectData.mappings['quantity']] || '0').replace(/[^0-9.-]+/g, '')) || 0;
+                        const contractRaw = String(r[contractColSave] || r['Contract_Status'] || '').trim();
+                        const hasContract = isContractedRefSave(contractRaw);
+                        const ptVal = String(r[ptColSave] || '').toLowerCase();
+                        if (hasContract) contractedSpendSave += amount;
+                        if (/immediate|cash|net 7|net0|net.?7|pickup|advance|prepay/i.test(ptVal)) ptRiskSpendSave += amount;
+
+                        let rowSav = 0;
+                        // Lever 1: Price Arbitrage
+                        if (item && gItemStats[item]?.supplierCount > 1 && up > gItemStats[item].minPrice) {
+                            const impliedQty = qty || (up > 0 ? amount / up : 0);
+                            const v = (up - gItemStats[item].minPrice) * impliedQty;
+                            if (v > 0) { rowSav = v; priceVarianceSave += v; totalIdentifiedSavingsSave += v; }
+                        }
+                        // Lever 2: Contract Compliance
+                        if (rowSav === 0 && !hasContract) {
+                            const catL = String(r[projectData.mappings['category_l1'] || projectData.mappings['category']] || '').toLowerCase();
+                            let rate = 0.05;
+                            if (catL.includes('material') || catL.includes('raw') || catL.includes('production')) rate = 0.08;
+                            else if (catL.includes('it') || catL.includes('tech') || catL.includes('software')) rate = 0.06;
+                            else if (catL.includes('logistics') || catL.includes('transport')) rate = 0.07;
+                            else if (catL.includes('facility') || catL.includes('maintenance')) rate = 0.10;
+                            else if (catL.includes('marketing') || catL.includes('media')) rate = 0.08;
+                            rowSav = amount * rate; complianceSave += rowSav; totalIdentifiedSavingsSave += rowSav;
+                        }
+                        // Lever 3: Single Source (contracted sole-source at 3%)
+                        if (rowSav === 0 && item && gItemStats[item]?.supplierCount === 1) {
+                            rowSav = amount * 0.03; singleSourceSave += rowSav; totalIdentifiedSavingsSave += rowSav;
+                        }
+                        // Lever 4: Tail Spend
+                        if (rowSav === 0 && gTailSet.has(supplier)) {
+                            rowSav = amount * 0.10; tailSpendSave += rowSav; totalIdentifiedSavingsSave += rowSav;
+                        }
+                        // Lever 5: Process Efficiency
+                        if (rowSav === 0 && amount < lvThreshold) {
+                            rowSav = peFixedSave; processEffSave += rowSav; totalIdentifiedSavingsSave += rowSav;
+                        }
+                    });
+
+                    const contractedPctSave = totalSpendVal > 0 ? (contractedSpendSave / totalSpendVal) * 100 : 0;
+                    const ptRiskPctSave = totalSpendVal > 0 ? (ptRiskSpendSave / totalSpendVal) * 100 : 0;
+
+                    // Item-level sourcing signals
+                    const iMapSave: Record<string, { spend: number, suppliers: Set<string> }> = {};
+                    updatedData.forEach(r => {
+                        const item = String(r[itemColSave] || '').trim();
+                        if (!item) return;
+                        const sup = String(r[supplierCol] || 'Unknown');
+                        const amt = parseFloat(String(r[amountColSave] || '0').replace(/[^0-9.-]+/g, '')) || 0;
+                        if (!iMapSave[item]) iMapSave[item] = { spend: 0, suppliers: new Set() };
+                        iMapSave[item].spend += amt;
+                        iMapSave[item].suppliers.add(sup);
+                    });
+                    const singleSrcSpendSave = Object.values(iMapSave).filter(i => i.suppliers.size === 1).reduce((a, i) => a + i.spend, 0);
+                    const singleSourcingPctSave = totalSpendVal > 0 ? (singleSrcSpendSave / totalSpendVal) * 100 : 0;
+
+                    // Tail spend % for lever signals
+                    const tailSpendAmtSave = Object.entries(gSupplierSpend).filter(([s]) => gTailSet.has(s)).reduce((a, [, v]) => a + v, 0);
+                    const tailSpendPctSave = gTotal > 0 ? (tailSpendAmtSave / gTotal) * 100 : 0;
 
                     const dateCol = projectData.mappings['date'];
                     let dateRangeStart = '';
@@ -674,8 +943,9 @@ const ProjectView: React.FC = () => {
                     if (dateCol) {
                         const dates = updatedData.map(row => row[dateCol]).filter(Boolean).map(d => new Date(d)).filter(d => !isNaN(d.getTime()));
                         if (dates.length > 0) {
-                            dateRangeStart = new Date(Math.min(...dates.map(d => d.getTime()))).toISOString();
-                            dateRangeEnd = new Date(Math.max(...dates.map(d => d.getTime()))).toISOString();
+                            // Phase 9 MEDIUM-02 FIX: Removed unguarded spread operator Math.max(...dates)
+                            dateRangeStart = new Date(dates.reduce((min, d) => Math.min(min, d.getTime()), dates[0].getTime())).toISOString();
+                            dateRangeEnd = new Date(dates.reduce((max, d) => Math.max(max, d.getTime()), dates[0].getTime())).toISOString();
                         }
                     }
 
@@ -694,7 +964,8 @@ const ProjectView: React.FC = () => {
 
                     const projectsDocRef = doc(db, 'projects', `${effectiveUid}_${currentProject.id}`);
                     await updateDoc(projectsDocRef, {
-                        categoryResults: updatedData,
+                        // PERF-03 FIX: We store the URL, not the megabyte JSON block
+                        categoryResultsUrl,
                         status: 'categorization_complete',
                         currentStep: 5,
                         updatedAt: serverTimestamp(),
@@ -707,15 +978,30 @@ const ProjectView: React.FC = () => {
                             topVendorSpend,
                             duplicateCount,
                             duplicateValue,
-                            savingsPotentialMin: totalSpendVal * 0.08,
-                            savingsPotentialMax: totalSpendVal * 0.12,
+                            // Savings — use REAL computed values, not synthetic 8-12% estimates
+                            savingsPotentialMin: totalIdentifiedSavingsSave,
+                            savingsPotentialMax: totalIdentifiedSavingsSave * 1.2,
+                            identifiedSavings: totalIdentifiedSavingsSave,
+                            // Savings breakdown by lever (for Quick-Win / Strategic split on restore)
+                            savingsBreakdown: {
+                                priceVariance: priceVarianceSave,
+                                compliance: complianceSave,
+                                singleSource: singleSourceSave,
+                                tailSpend: tailSpendSave,
+                                processEfficiency: processEffSave,
+                            },
+                            // Key dataset signals (for data-driven lever probabilities on restore)
+                            contractedPercent: contractedPctSave,
+                            ptRiskPercent: ptRiskPctSave,
+                            singleSourcingPct: singleSourcingPctSave,
+                            tailSpendPct: tailSpendPctSave,
+                            // ABC as spend amounts (not counts) for correct % display
                             abcA,
                             abcB,
                             abcC,
                             dateRangeStart,
                             dateRangeEnd,
                             totalRows: updatedData.length,
-                            raw: updatedData,
                             mappings: projectData.mappings,
                             currency: projectData.currency,
                             clusters: projectData.clusters,
@@ -731,12 +1017,14 @@ const ProjectView: React.FC = () => {
                                 totalSpend: totalSpendVal,
                                 uniqueVendors: uniqueSuppliers,
                                 uniqueCategories,
-                                savingsPotentialMin: totalSpendVal * 0.08,
-                                savingsPotentialMax: totalSpendVal * 0.12,
+                                savingsPotentialMin: totalIdentifiedSavingsSave,
+                                savingsPotentialMax: totalIdentifiedSavingsSave * 1.2,
+                                identifiedSavings: totalIdentifiedSavingsSave,
                                 duplicateCount,
                                 abcA,
                                 abcB,
-                                abcC
+                                abcC,
+                                categoryResultsUrl: categoryResultsUrl // Mirrored for unified download access
                             }
                         });
                     }
@@ -754,7 +1042,8 @@ const ProjectView: React.FC = () => {
 
     const handleExport = async () => {
         const pd = projectData;
-        if (!pd || pd.raw.length === 0 || !user) return;
+        // CRITICAL-03 FIX: Guard against !effectiveUid instead of !user
+        if (!pd || pd.raw.length === 0 || !effectiveUid) return;
         try {
             const wb = XLSX.utils.book_new();
             const ws = XLSX.utils.json_to_sheet(pd.raw);
@@ -807,12 +1096,13 @@ const ProjectView: React.FC = () => {
             updateProject(currentProject.id, { status: 'completed' });
             updateProjectCache(currentProject.id, projectData);
 
-            if (effectiveUid && db && !isViewingClient) {
+            // Phase 9 CRITICAL-04 FIX: Removed !isViewingClient so Admins can finalize pipelines on behalf of users.
+            if (effectiveUid && db) {
                 (async () => {
                     try {
                         const projectRef = doc(db, 'projects', `${effectiveUid}_${currentProject.id}`);
                         await updateDoc(projectRef, {
-                            dataQualityResults: projectData.raw, // Saving raw for now as representative
+                            // Phase 9 PERF-03: DO NOT save raw payload objects in docs. We rely on rawGridUrl stored previously.
                             status: 'data_quality_complete',
                             currentStep: 6,
                             finalizedAt: serverTimestamp(),
@@ -915,15 +1205,46 @@ const ProjectView: React.FC = () => {
                                 <span className="text-zinc-500 text-xs font-medium hidden md:inline">{(isAdmin && isViewingClient && viewingClient) ? viewingClient.displayName || viewingClient.email?.split('@')[0] : user?.displayName || user?.email?.split('@')[0]}</span>
                             </div>
                             <div className="px-3 py-1.5 bg-zinc-900 rounded-lg text-xs font-bold text-zinc-400 flex items-center gap-2"><FileCheck2 className="h-4 w-4 text-zinc-600" /> Last Save: Just now</div>
-                            <button onClick={() => alert('Project draft saved successfully.')} className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-white rounded-lg text-xs font-bold transition-all">Save Draft</button>
-                            <button onClick={() => {
-                                if (activeStep === 'dashboard' && projectData.fileMeta) setActiveStep('header-selection');
-                                else if (activeStep === 'mapping') handleMappingComplete(projectData.mappings, projectData.currency);
-                                else if (activeStep === 'matching') handleMatchingComplete(projectData.clusters);
-                                else if (activeStep === 'categorization') handleCategoryComplete(projectData.raw);
-                                else if (activeStep === 'data-quality') handleDataQualityComplete();
-                                else alert('Complete the current step first.');
-                            }} className="px-4 py-2 bg-primary hover:bg-primary/90 text-white rounded-lg text-xs font-bold transition-all shadow-lg shadow-primary/20">Run Step</button>
+                            {/* FIX 5: Save Draft persists the current pipeline step to Firestore */}
+                            <button onClick={async () => {
+                                if (!currentProject || !effectiveUid) return;
+                                try {
+                                    const projectRef = doc(db, 'projects', `${effectiveUid}_${currentProject.id}`);
+                                    await updateDoc(projectRef, {
+                                        columnMapping: projectData.mappings,
+                                        currency: projectData.currency,
+                                        updatedAt: serverTimestamp(),
+                                    });
+                                    alert('Draft saved successfully.');
+                                } catch (err) {
+                                    console.error('[Save Draft]', err);
+                                    alert('Save failed. Please try again.');
+                                }
+                            }} className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-white rounded-lg text-xs font-bold transition-all">Save Draft</button>
+                            {/* FIX 6: Run Step is only enabled when there is meaningful data to process */}
+                            {(() => {
+                                const canRunStep = (
+                                    (activeStep === 'header-selection' && (projectData.rawSheetData?.length ?? 0) > 0) ||
+                                    (activeStep === 'mapping' && projectData.headers.length > 0) ||
+                                    (activeStep === 'matching' && projectData.raw.length > 0) ||
+                                    (activeStep === 'categorization' && projectData.raw.length > 0) ||
+                                    (activeStep === 'data-quality' && projectData.raw.length > 0)
+                                );
+                                return (
+                                    <button
+                                        disabled={!canRunStep}
+                                        onClick={() => {
+                                            if (activeStep === 'mapping') handleMappingComplete(projectData.mappings, projectData.currency);
+                                            else if (activeStep === 'matching') handleMatchingComplete(projectData.clusters);
+                                            else if (activeStep === 'categorization') handleCategoryComplete(projectData.raw);
+                                            else if (activeStep === 'data-quality') handleDataQualityComplete();
+                                        }}
+                                        className="px-4 py-2 bg-primary hover:bg-primary/90 text-white rounded-lg text-xs font-bold transition-all shadow-lg shadow-primary/20 disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none"
+                                    >
+                                        Run Step
+                                    </button>
+                                );
+                            })()}
                             <ExportButton canExport={canExport} onExport={handleExport} />
                         </div>
                     </header>
@@ -989,8 +1310,41 @@ const ProjectView: React.FC = () => {
                                                             >
                                                                 Continue Processing
                                                             </button>
+                                                            {/* FIX 7: Reset in-place — clear rawGridUrl from Firestore and show the FileUpload widget
+                                                                 without navigating the user away from their current project. */}
                                                             <button
-                                                                onClick={() => setCurrentProject(null)}
+                                                                onClick={async () => {
+                                                                    if (!currentProject || !effectiveUid) return;
+                                                                    try {
+                                                                        const projectRef = doc(db, 'projects', `${effectiveUid}_${currentProject.id}`);
+                                                                        await updateDoc(projectRef, {
+                                                                            rawGridUrl: null,
+                                                                            currentStep: 0,
+                                                                            status: 'draft',
+                                                                            fileName: null,
+                                                                            rowCount: 0,
+                                                                            updatedAt: serverTimestamp(),
+                                                                        });
+                                                                        // Clear local session data so SHOW_UPLOAD renders
+                                                                        setProjectData({
+                                                                            raw: [],
+                                                                            headers: [],
+                                                                            mappings: {},
+                                                                            currency: 'INR',
+                                                                            clusters: [],
+                                                                            fileMeta: undefined,
+                                                                        });
+                                                                        setActiveStep('dashboard');
+                                                                        // Update local project object so determineProjectState flips immediately
+                                                                        updateProject(currentProject.id, {
+                                                                            rawGridUrl: undefined,
+                                                                            currentStep: 0,
+                                                                            status: 'draft',
+                                                                        } as any);
+                                                                    } catch (err) {
+                                                                        console.error('[Upload Different File]', err);
+                                                                    }
+                                                                }}
                                                                 className="bg-zinc-800 hover:bg-zinc-700 text-zinc-300 px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all"
                                                             >
                                                                 Upload Different File
@@ -1034,6 +1388,7 @@ const ProjectView: React.FC = () => {
                                                     currency={projectData.currency}
                                                     projectStats={currentProject?.stats}
                                                     restoredAnalysis={analysis}
+                                                    isLoading={isRestoring}
                                                     restoredStats={{
                                                         totalSpend,
                                                         savingsPotentialMin,
@@ -1042,7 +1397,14 @@ const ProjectView: React.FC = () => {
                                                         duplicateCount,
                                                         abcA,
                                                         abcB,
-                                                        abcC
+                                                        abcC,
+                                                        // Extended savings signals (present for projects after the savings-engine fix)
+                                                        ...(identifiedSavings ? { identifiedSavings } : {}),
+                                                        ...(savingsBreakdown ? { savingsBreakdown } : {}),
+                                                        ...(contractedPercent != null ? { contractedPercent } : {}),
+                                                        ...(ptRiskPercent != null ? { ptRiskPercent } : {}),
+                                                        ...(singleSourcingPct != null ? { singleSourcingPct } : {}),
+                                                        ...(tailSpendPct != null ? { tailSpendPct } : {}),
                                                     }}
                                                 />
                                             )}
@@ -1096,7 +1458,7 @@ const ProjectView: React.FC = () => {
                             )}
                             {activeStep === 'matching' && <SupplierMatching onComplete={handleMatchingComplete} data={projectData.raw} mappings={projectData.mappings} />}
                             {activeStep === 'categorization' && <CategoryMapper data={projectData.raw} mappings={projectData.mappings} onComplete={handleCategoryComplete} currency={projectData.currency} />}
-                            {activeStep === 'history' && <ActivityHistory />}
+                            {activeStep === 'history' && <ActivityHistory projectId={currentProject?.id || ''} />}
                         </div>
                     </div>
                 </main>

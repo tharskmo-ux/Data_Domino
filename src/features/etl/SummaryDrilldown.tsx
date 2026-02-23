@@ -16,6 +16,7 @@ interface SummaryDrilldownProps {
     color?: string;
     userId?: string;
     projectId?: string;
+    currency?: string;
 }
 
 const SummaryDrilldown: React.FC<SummaryDrilldownProps> = ({
@@ -27,6 +28,7 @@ const SummaryDrilldown: React.FC<SummaryDrilldownProps> = ({
     color = 'primary',
     userId,
     projectId,
+    currency = 'INR'
 }) => {
     const { isViewingClient } = useAdminView();
     const [searchQuery, setSearchQuery] = useState('');
@@ -80,7 +82,7 @@ const SummaryDrilldown: React.FC<SummaryDrilldownProps> = ({
     const formatCurrency = (val: number) => {
         return new Intl.NumberFormat('en-IN', {
             style: 'currency',
-            currency: 'INR',
+            currency: currency,
             maximumSignificantDigits: 3,
             notation: 'compact'
         }).format(val);

@@ -44,6 +44,7 @@ import { useEffectiveUid } from '../../hooks/useEffectiveUid';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
 import { db, storage } from '../../lib/firebase';
+import { getAutoMappings } from '../../utils/columnDetection';
 
 interface AnalyticsDashboardProps {
     data: any[];
@@ -59,13 +60,28 @@ interface AnalyticsDashboardProps {
         savingsPotentialMax: number;
         uniqueVendors: number;
         duplicateCount: number;
+        // ABC stored as spend amounts (not counts) since the Nov-2024 save fix
         abcA: number;
         abcB: number;
         abcC: number;
+        // Extended fields saved since the savings-engine fix
+        identifiedSavings?: number;
+        savingsBreakdown?: {
+            priceVariance: number;
+            compliance: number;
+            singleSource: number;
+            tailSpend: number;
+            processEfficiency: number;
+        };
+        contractedPercent?: number;
+        ptRiskPercent?: number;
+        singleSourcingPct?: number;
+        tailSpendPct?: number;
     };
+    isLoading?: boolean;
 }
 
-const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings, clusters, initialTab = 'overview', currency = 'INR', projectStats, restoredAnalysis, restoredStats }) => {
+const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings, clusters, initialTab = 'overview', currency = 'INR', projectStats, restoredAnalysis, restoredStats, isLoading = false }) => {
     const { currentProject, addActivity } = useProjects();
     const { isAdmin } = useAuth();
     const effectiveUid = useEffectiveUid();
@@ -189,11 +205,22 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
     }, [clusters, vendorSearch]);
 
     const dynamicStats = useMemo(() => {
-        const amountCol = mappings['amount'];
-        // Prioritize L1 for the main dashboard view, fallback to legacy 'category'
-        const catCol = mappings['category_l1'] || mappings['category'];
-        const dateCol = mappings['date'];
+        // ─── Shared Column Resolution ─────────────────────────────────────────
+        // Use the shared auto-detection utility to find amount, date, supplier,
+        // categories etc. even if the user didn't map them explicitly.
+        const resolvedMappings = getAutoMappings(data, mappings);
 
+        const amountCol = resolvedMappings['amount'];
+        // Prioritize L1 for the main dashboard view, fallback to legacy 'category'
+        const catCol = resolvedMappings['category_l1'] || resolvedMappings['category'];
+        const dateCol = resolvedMappings['date'];
+        const ptCol = resolvedMappings['payment_terms'];
+        const contractCol = resolvedMappings['contract_ref'];
+        const buColRaw = resolvedMappings['business_unit'] || resolvedMappings['plant'] || '';
+        const locColRaw = resolvedMappings['location'] || resolvedMappings['plant'] || '';
+        const unitPriceCol = resolvedMappings['unit_price'];
+        const quantityCol = resolvedMappings['quantity'];
+        const supplierCol = resolvedMappings['supplier'];
 
         const filteredRows = data.filter(row => {
             const supplier = String(row[mappings['supplier']] || '').toLowerCase();
@@ -210,12 +237,13 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
         // Calculate totals from filtered rows
         const stats = filteredRows.reduce((acc, row) => {
             const amount = parseFloat(String(row[amountCol] || '0').replace(/[^0-9.-]+/g, "")) || 0;
-            const isContracted = row['Contract_Status'] === 'Contracted';
+            // Contract Compliance: check mapped or auto-detected contractCol, also fallback to 'Contract_Status' field
+            const contractVal = String(row[contractCol] || row['Contract_Status'] || '').trim();
+            const isContracted = /contracted|active|valid|yes|\bY\b/i.test(contractVal) && contractVal !== '';
 
-            // Payment Terms Risk Detection
-            const ptCol = mappings['payment_terms'];
+            // Payment Terms Risk Detection — uses auto-detected ptCol
             const ptValue = String(row[ptCol] || '').toLowerCase();
-            const isPTRisk = /immediate|cash|net 7|net0|pickup/i.test(ptValue);
+            const isPTRisk = /immediate|cash|net 7|net0|net.?7|pickup|advance|prepay/i.test(ptValue);
 
             return {
                 spend: acc.spend + amount,
@@ -225,9 +253,13 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
             };
         }, { spend: 0, count: 0, contractedSpend: 0, ptRiskSpend: 0 });
 
-        const totalSpend = stats.spend || restoredAnalysis?.totalSpend || projectStats?.spend || 0;
+        const totalSpend = stats.spend || restoredStats?.totalSpend || restoredAnalysis?.totalSpend || projectStats?.spend || 0;
         const contractedPercent = totalSpend > 0 ? (stats.contractedSpend / totalSpend) * 100 : 0;
-        const vendorCount = clusters.length > 0 ? clusters.length : (restoredAnalysis?.uniqueVendors || new Set(filteredRows.map(r => String(r[mappings['supplier']] || ''))).size);
+        // Vendor count: prefer live clusters, then live unique set, then saved value
+        const liveVendorCount = clusters.length > 0
+            ? clusters.length
+            : new Set(filteredRows.map(r => String(r[mappings['supplier']] || ''))).size;
+        const vendorCount = liveVendorCount || restoredStats?.uniqueVendors || restoredAnalysis?.uniqueVendors || 0;
 
         // 0. Global Pre-calculation for Item Details (Min Price & Sourcing Status)
         // We need this from the FULL dataset 'data' to ensure 'Single Source' and 'Min Price' are accurate globally,
@@ -235,10 +267,10 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
         const globalItemStats: Record<string, { minPrice: number, bestSupplier: string, supplierCount: number, suppliers: Set<string> }> = {};
 
         data.forEach(row => {
-            const item = String(row[mappings['item_description']] || '').trim();
+            const item = String(row[mappings['item_description'] || itemCol || ''] || '').trim();
             if (!item) return;
-            const unitPrice = parseFloat(String(row[mappings['unit_price']] || '0').replace(/[^0-9.-]+/g, ""));
-            const supplier = String(row[mappings['supplier']] || '');
+            const unitPrice = parseFloat(String(row[unitPriceCol] || '0').replace(/[^0-9.-]+/g, ""));
+            const supplier = String(row[supplierCol] || '');
 
             if (!globalItemStats[item]) {
                 globalItemStats[item] = { minPrice: unitPrice || Infinity, bestSupplier: supplier, supplierCount: 0, suppliers: new Set() };
@@ -272,9 +304,9 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
         let ytdSpend = 0;
         let lySpend = 0;
 
-        // 2. Business Unit & Location Distributions
-        const buCol = mappings['business_unit'] || mappings['plant'];
-        const locCol = mappings['location'] || mappings['plant'];
+        // 2. Business Unit & Location Distributions — use auto-detected columns
+        const buCol = buColRaw;
+        const locCol = locColRaw;
         const buMap: Record<string, number> = {};
         const locMap: Record<string, number> = {};
         const poSet = new Set<string>();
@@ -289,7 +321,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
         // 3. Sourcing Strategy Logic (Single vs Multi Source) - Local View
         let itemCol = mappings['item_description'];
 
-        // Auto-detect fallback if not explicitly mapped
+        // Auto-detect fallback if not explicitly mapped (same pattern as other auto-detections above)
         if (!itemCol && data.length > 0) {
             const potentialColumns = Object.keys(data[0]);
             itemCol = potentialColumns.find(c => /item|material|description|part|sku|product/i.test(c)) || '';
@@ -352,14 +384,32 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
         }
 
 
+        // FIX 3: Currency-aware low-value PO threshold and process saving.
+        // Use approximate per-transaction cost based on currency purchasing power.
+        // INR: threshold ₹5,000 / saving ₹500 | USD/GBP/EUR: threshold 100 / saving 50 | default: 5%
+        const isHighValueCurrency = /^(USD|GBP|EUR|AUD|CAD|CHF|SGD)$/i.test(currency);
+        const lowValueThreshold = isHighValueCurrency ? 100 : 5000;
+        const processEfficiencySaving = isHighValueCurrency ? 50 : 500;
+
+        // FIX 1 helper: A contract reference is only "active/contracted" if it is a non-empty,
+        // non-placeholder string that passes the contracted pattern check used elsewhere in this file.
+        // Blank, "N/A", "None", "Unverified", "-" all mean OFF-CONTRACT.
+        const isContractedRef = (val: string): boolean => {
+            if (!val || /^[-–—/\s]*$/.test(val)) return false;
+            if (/^(n\/?a|none|nil|unverified|not available|no contract|tbd|pending|--)$/i.test(val.trim())) return false;
+            return /contracted|active|valid|yes|\bY\b|PO-|CT-|CON-|AGR-|\d{4,}/i.test(val);
+        };
+
         filteredRows.forEach(row => {
             const cat = row[catCol] || 'Uncategorized';
             const amount = parseFloat(String(row[amountCol] || '0').replace(/[^0-9.-]+/g, "")) || 0;
             const supplier = String(row[mappings['supplier']] || '');
             const item = String(row[itemCol] || '').trim();
-            const unitPrice = parseFloat(String(row[mappings['unit_price']] || '0').replace(/[^0-9.-]+/g, "")) || 0;
-            const quantity = parseFloat(String(row[mappings['quantity']] || '0').replace(/[^0-9.-]+/g, "")) || 0;
-            const contract = String(row[mappings['contract_ref']] || '').trim();
+            const unitPrice = parseFloat(String(row[unitPriceCol] || '0').replace(/[^0-9.-]+/g, "")) || 0;
+            const quantity = parseFloat(String(row[quantityCol] || '0').replace(/[^0-9.-]+/g, "")) || 0;
+            // FIX 1: Use stricter isContractedRef instead of a raw truthy check on the raw string.
+            const contractRaw = String(row[contractCol] || row['Contract_Status'] || '').trim();
+            const hasActiveContract = isContractedRef(contractRaw);
 
             catMap[cat] = (catMap[cat] || 0) + amount;
 
@@ -378,11 +428,20 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                 itemMap[item].vendorDetails[sup] = (itemMap[item].vendorDetails[sup] || 0) + amount;
             }
 
-            // --- Real Savings Logic (Prioritized) ---
+            // ── Prioritized Savings Logic ─────────────────────────────────────────
+            // Each lever fires only if no higher-priority lever already claimed this row.
+            // Priority order (highest first):
+            //   1. Price Arbitrage   – measured price gap across suppliers for same item
+            //   2. Contract Consol.  – off-contract spend (FIX 1: strict contract test)
+            //                          FIX 2: moved ABOVE single-source so that uncategorised
+            //                          single-source off-contract spend gets 5-10% not 2%
+            //   3. Single Source     – un-tendered single-supplier items (no alternate yet)
+            //   4. Tail Consol.      – long-tail supplier consolidation
+            //   5. Process Eff.      – low-value POs (FIX 3: currency-scaled)
             let rowSavings = 0;
             let logicType: keyof typeof savingsBreakdown | null = null;
 
-            // 1. Price Variance
+            // LEVER 1: Price Arbitrage — actual measured price gap (most precise, highest priority)
             if (item && globalItemStats[item] && globalItemStats[item].supplierCount > 1 && unitPrice > globalItemStats[item].minPrice) {
                 const bestPrice = globalItemStats[item].minPrice;
                 const impliedQty = quantity || (unitPrice > 0 ? amount / unitPrice : 0);
@@ -393,45 +452,49 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                 }
             }
 
-            // 2. Single Source Risk (Only if no Price Variance)
-            if (rowSavings === 0 && item && globalItemStats[item] && globalItemStats[item].supplierCount === 1) {
-                // For Single Source, savings is 'Potential' - often estimated as 2-5% benefit of multi-sourcing.
-                // Let's use 2% of spend.
-                rowSavings = amount * 0.02;
-                logicType = 'singleSource';
-            }
-
-            // 3. Contract & Category-Specific Consolidation Savings
-            if (rowSavings === 0 && !contract) {
-                // Category-specific rates based on realistically achievable mid-market negotiation outcomes
-                const catLower = cat.toLowerCase();
-                let rate = 0.05; // Default 5%
-
-                if (catLower.includes('material') || catLower.includes('mfg') || catLower.includes('production')) {
-                    rate = 0.08;
-                } else if (catLower.includes('it') || catLower.includes('tech') || catLower.includes('software')) {
-                    rate = 0.06;
-                } else if (catLower.includes('logistics') || catLower.includes('transport') || catLower.includes('freight')) {
-                    rate = 0.07;
-                } else if (catLower.includes('facility') || catLower.includes('housekeeping') || catLower.includes('clean')) {
-                    rate = 0.10;
+            // LEVER 2: Contract Consolidation — off-contract spend (FIX 1 + FIX 2)
+            // Fires before single-source so uncategorised off-contract rows get the higher 5-10% rate.
+            if (rowSavings === 0 && !hasActiveContract) {
+                const catLower = String(cat).toLowerCase();
+                // Category-specific negotiation yield benchmarks (industry mid-market reference)
+                let rate = 0.05; // Default: Indirect / General
+                if (catLower.includes('material') || catLower.includes('mfg') || catLower.includes('production') || catLower.includes('raw')) {
+                    rate = 0.08; // Direct materials: 6-10% typical
+                } else if (catLower.includes('it') || catLower.includes('tech') || catLower.includes('software') || catLower.includes('saas')) {
+                    rate = 0.06; // IT: 4-8% typical
+                } else if (catLower.includes('logistics') || catLower.includes('transport') || catLower.includes('freight') || catLower.includes('shipping')) {
+                    rate = 0.07; // Logistics: 5-9% typical
+                } else if (catLower.includes('facility') || catLower.includes('housekeeping') || catLower.includes('clean') || catLower.includes('maintenance')) {
+                    rate = 0.10; // FM: 8-12% typical
+                } else if (catLower.includes('marketing') || catLower.includes('media') || catLower.includes('advertising')) {
+                    rate = 0.08; // Marketing: 6-10% typical
+                } else if (catLower.includes('professional') || catLower.includes('consult') || catLower.includes('legal') || catLower.includes('advisory')) {
+                    rate = 0.05; // Professional services: 3-7% typical
                 }
-
                 rowSavings = amount * rate;
                 logicType = 'compliance';
             }
 
-            // 4. Tail Spend
+            // LEVER 3: Single Source Risk — items with no alternative supplier yet tendered
+            // FIX 2: Now fires AFTER contract check. If a single-source item has no contract,
+            // it was already captured by Lever 2 at the higher category rate above.
+            // This lever only fires for single-source items that DO have a contract (negotiated sole-source).
+            if (rowSavings === 0 && item && globalItemStats[item] && globalItemStats[item].supplierCount === 1) {
+                // Estimated 3-5% benefit from introducing a second qualified supplier / competitive benchmark.
+                // Use 3% (conservative) since the item already has a contract price reference.
+                rowSavings = amount * 0.03;
+                logicType = 'singleSource';
+            }
+
+            // LEVER 4: Tail Spend Consolidation — supplier is in the bottom-20%-of-spend long tail
             if (rowSavings === 0 && globalTailSet.has(supplier)) {
-                // Tail spend consolidation - potential 10% process/price savings
                 rowSavings = amount * 0.10;
                 logicType = 'tailSpend';
             }
 
-            // 5. Low Value PO
-            if (rowSavings === 0 && amount < 5000) {
-                // Process efficiency - fixed cost saving per PO? Let's say flat ₹500
-                rowSavings = 500;
+            // LEVER 5: Process Efficiency — low-value POs (FIX 3: currency-aware flat saving)
+            if (rowSavings === 0 && amount < lowValueThreshold) {
+                rowSavings = processEfficiencySaving;
                 logicType = 'processEfficiency';
             }
 
@@ -548,7 +611,26 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
             { name: 'Indirect', value: Math.round((spendTypeMap.Indirect / totalSpend) * 100) || 0, color: '#f43f5e' }
         ].filter(i => i.value > 0);
 
-        const identifiedSavings = totalIdentifiedSavings || restoredAnalysis?.savingsPotentialMin || projectStats?.savingsPotential || (totalSpend * 0.1);
+        // FIX 4: Prefer live computed savings; fall back to the REAL saved value from
+        // latestAnalysis.identifiedSavings (written by the pipeline on first completion).
+        // Only use the old 8% heuristic estimate as a last resort.
+        // isSyntheticFallback = true means we are showing a restored/estimated figure,
+        // not a freshly computed one — the JSX displays a badge to make that clear.
+        const hasLiveRows = filteredRows.length > 0;
+        const isSyntheticFallback = totalIdentifiedSavings === 0;
+        const identifiedSavings = !isSyntheticFallback
+            ? totalIdentifiedSavings
+            : (restoredStats?.identifiedSavings          // saved real value (new save format)
+                ?? restoredAnalysis?.identifiedSavings   // also on the analysis object
+                ?? restoredAnalysis?.savingsPotentialMin // old saved 8% estimate
+                ?? projectStats?.savingsPotential
+                ?? 0);
+
+        // Restored savings breakdown — used when live rows aren't loaded yet
+        const restoredBreakdown = restoredStats?.savingsBreakdown ?? restoredAnalysis?.savingsBreakdown;
+        const effectiveBreakdown = hasLiveRows
+            ? savingsBreakdown
+            : (restoredBreakdown ?? savingsBreakdown);
 
         const supplierSummaryBySpend = Object.entries(supplierStatsMap).map(([name, stats]) => ({
             [mappings['supplier']]: name,
@@ -564,7 +646,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
         }));
 
         const avgPOValue = poSet.size > 0 ? totalSpend / poSet.size : totalSpend;
-        const complianceScore = Math.round((compliantSpend / (totalSpend || 1)) * 100);
+        // complianceScore alias removed — levers now use contractedPercent directly
         const vsLYGrowth = lySpend > 0 ? ((fySpend - lySpend) / lySpend) * 100 : 0;
 
         // 4. Advanced Tail Spend Pareto & Multi-Lens Logic (Refactored)
@@ -705,33 +787,162 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                         key === 'compliance' ? 'Shift unverified spend to contracted partners for volume leverage.' :
                             key === 'tailSpend' ? 'Consolidate multiple small vendors into strategic master partners.' :
                                 'Optimize procurement workflow to reduce high-frequency low-value POs.',
-                calculation: key === 'priceVariance' ? 'Σ ((Current Price - Min Global Price) * Quantity)' :
-                    key === 'singleSource' ? '2.0% Estimated yield on ₹' + formatCurrency(d.spend) + ' un-tendered spend' :
-                        key === 'compliance' ? 'Avg 5-10% category-weighted leverage on ₹' + formatCurrency(d.spend) + ' off-contract spend' :
-                            key === 'tailSpend' ? '10% Process & price saving on ₹' + formatCurrency(d.spend) + ' long-tail spend' :
-                                'Fixed process cost saving of ₹500 per low-value PO'
+                calculation: key === 'priceVariance' ? 'Σ ((Current Price - Min Global Price) × Quantity)' :
+                    key === 'singleSource' ? `3% Conservative yield on sole-source contracted spend of ${formatCurrency(d.spend)}` :
+                        key === 'compliance' ? `Avg 5–10% category-weighted leverage on ${formatCurrency(d.spend)} off-contract spend` :
+                            key === 'tailSpend' ? `10% Consolidation saving on ${formatCurrency(d.spend)} long-tail spend` :
+                                `Fixed process saving of ${isHighValueCurrency ? '~50' : '~500'} ${currency} per low-value PO`
             }))
             .sort((a, b) => b.value - a.value)
             .slice(0, 3);
 
+        // ── DATA-DRIVEN SAVINGS LEVERS ────────────────────────────────────────────
+        // FIX 7+8+9: Probabilities are fully derived from actual dataset signals.
+        // Each lever starts at a neutral base and is pushed up/down by measured
+        // characteristics of the uploaded spend data.  No static "85%" values.
+        //
+        // Signal definitions (all sourced from variables already computed above):
+        //   spendConcentration = top-5 supplier spend share (0–100)
+        //   singleSourcingPct  = % of item-spend that has only one supplier
+        //   uncontractedPct    = % of spend with no active contract reference
+        //   tailSpendPct       = % of spend in the long-tail supplier set
+        //   ptRiskPct          = % of spend on risky payment terms (cash / net-7)
+        //   directPct          = % of spend classified as Direct
+        //   buDiversity        = number of distinct business units found
+        //   priceVarSavings    = savings attributed to price arbitrage lever
+
+        // Lever signals — prefer live-computed values; fall back to saved signals from
+        // latestAnalysis when no rows are in the filtered view (e.g. on first re-login).
+        const spendConcentration = topSuppliers.slice(0, 5).reduce((acc, s) => acc + s.share, 0); // 0-100
+        const singleSourcingPct  = hasLiveRows
+            ? sourcingData.singlePercent
+            : (restoredStats?.singleSourcingPct ?? restoredAnalysis?.singleSourcingPct ?? 0);
+        const uncontractedPct    = hasLiveRows
+            ? (100 - contractedPercent)
+            : (100 - (restoredStats?.contractedPercent ?? restoredAnalysis?.contractedPercent ?? contractedPercent));
+        const ptRiskPct          = hasLiveRows
+            ? (totalSpend > 0 ? (stats.ptRiskSpend / totalSpend) * 100 : 0)
+            : (restoredStats?.ptRiskPercent ?? restoredAnalysis?.ptRiskPercent ?? 0);
+        const tailSpendPctSignal = hasLiveRows
+            ? tailSpendPercentage
+            : (restoredStats?.tailSpendPct ?? restoredAnalysis?.tailSpendPct ?? tailSpendPercentage);
+        const directPct          = spendTypeData.find(s => s.name === 'Direct')?.value ?? 0;       // 0-100
+        const buDiversity        = Object.keys(buMap).length;                                      // integer
+
+        // Signal: whether meaningful price-variance data exists across multi-source items
+        const hasPriceVarianceData = effectiveBreakdown.priceVariance > 0;
+
+        // ── Per-lever probability computation ────────────────────────────────────
+        // Formula: clamp(base + Σ signals, 5, 98)
+        // Each signal is a bounded adjustment so no single signal can dominate.
+
+        const clamp = (v: number, min = 5, max = 98) => Math.round(Math.max(min, Math.min(max, v)));
+
         const savingsLevers = [
-            { id: 'vol', name: "Volume-based discounting", baseProb: 75, color: "#14b8a6" },
-            { id: 'long', name: "Long-term fixed or index-linked contracts", baseProb: 65, color: "#0d9488" },
-            { id: 'rev', name: "Reverse and expressive bidding", baseProb: 40, color: "#0f766e" },
-            { id: 'cost', name: "Should-cost analysis", baseProb: 70, color: "#115e59" },
-            { id: 'bund', name: "Bundling/Unbundling", baseProb: 55, color: "#134e4a" },
-            { id: 'make', name: "Make-or-buy", baseProb: 30, color: "#155e75" },
-            { id: 'lcc', name: "Low-cost country (LCC) sourcing", baseProb: 45, color: "#0e7490" },
-            { id: 'pay', name: "Payment terms optimization", baseProb: 85, color: "#2dd4bf" }
-        ].map(l => {
-            let prob = l.baseProb;
-            // Context-awareness logic
-            if (l.id === 'vol' && totalSpend > 10000000) prob += 10;
-            if (l.id === 'rev' && sourcingData.singlePercent > 40) prob += 15;
-            if (l.id === 'bund' && tailSpendPercentage > 20) prob += 12;
-            if (l.id === 'pay' && complianceScore < 60) prob += 8;
-            return { ...l, probability: Math.min(prob, 98) };
-        }).sort((a, b) => b.probability - a.probability);
+            {
+                id: 'vol',
+                name: 'Volume-based discounting',
+                color: '#14b8a6',
+                // High probability when spend is concentrated enough to use volume leverage
+                // but not so fragmented that no single category is big enough to negotiate on.
+                probability: clamp(
+                    35                                            // neutral base
+                    + (spendConcentration > 60 ? 20 : spendConcentration > 40 ? 10 : 0)  // concentrated spend ↑
+                    + (totalSpend > 50_000_000 ? 15 : totalSpend > 10_000_000 ? 8 : 0)   // large total spend ↑
+                    + (uncontractedPct > 50 ? 10 : uncontractedPct > 30 ? 5 : 0)          // off-contract headroom ↑
+                    + (buDiversity >= 3 ? 8 : 0)                                           // multi-BU = pooling opportunity ↑
+                )
+            },
+            {
+                id: 'long',
+                name: 'Long-term / index-linked contracts',
+                color: '#0d9488',
+                // Strongest when off-contract spend is high AND total spend justifies multi-year commitment
+                probability: clamp(
+                    30
+                    + (uncontractedPct > 60 ? 30 : uncontractedPct > 40 ? 18 : uncontractedPct > 20 ? 8 : 0)
+                    + (totalSpend > 20_000_000 ? 12 : totalSpend > 5_000_000 ? 6 : 0)
+                    + (spendConcentration > 50 ? 8 : 0)
+                )
+            },
+            {
+                id: 'rev',
+                name: 'Reverse / expressive bidding',
+                color: '#0f766e',
+                // Applicable when there are many single-source items with no competitive tension
+                // and when price variance across suppliers has been detected
+                probability: clamp(
+                    20
+                    + (singleSourcingPct > 50 ? 30 : singleSourcingPct > 30 ? 18 : singleSourcingPct > 15 ? 8 : 0)
+                    + (hasPriceVarianceData ? 15 : 0)              // price dispersion = auction value ↑
+                    + (uncontractedPct > 40 ? 10 : 0)
+                    + (vendorCount > 50 ? 5 : 0)                   // many suppliers = more bidders available ↑
+                )
+            },
+            {
+                id: 'cost',
+                name: 'Should-cost analysis',
+                color: '#115e59',
+                // Relevant when direct materials dominate and price variance exists
+                probability: clamp(
+                    25
+                    + (directPct > 50 ? 25 : directPct > 30 ? 12 : 0)   // direct spend = cost-modelling opportunity ↑
+                    + (hasPriceVarianceData ? 20 : 0)                      // measured price gap = should-cost gap ↑
+                    + (singleSourcingPct > 40 ? 10 : 0)                    // no competitor price = need cost model ↑
+                    + (totalSpend > 10_000_000 ? 8 : 0)
+                )
+            },
+            {
+                id: 'bund',
+                name: 'Bundling / Unbundling',
+                color: '#134e4a',
+                // Strong when tail is large (bundle small vendors) and multi-BU exists (cross-BU bundling)
+                probability: clamp(
+                    20
+                    + (tailSpendPctSignal > 30 ? 25 : tailSpendPctSignal > 15 ? 15 : tailSpendPctSignal > 5 ? 7 : 0)
+                    + (buDiversity >= 4 ? 15 : buDiversity >= 2 ? 8 : 0)
+                    + (finalTailSuppliersSet.size > 20 ? 12 : finalTailSuppliersSet.size > 10 ? 6 : 0)
+                    + (spendConcentration < 40 ? 8 : 0)  // fragmented spend = bundling headroom ↑
+                )
+            },
+            {
+                id: 'make',
+                name: 'Make-or-buy analysis',
+                color: '#155e75',
+                // Only relevant for Direct spend dominated datasets with high single-source %
+                probability: clamp(
+                    10                                               // low base — dataset-specific
+                    + (directPct > 60 ? 22 : directPct > 40 ? 12 : directPct > 20 ? 5 : 0)
+                    + (singleSourcingPct > 60 ? 15 : singleSourcingPct > 40 ? 8 : 0)
+                    + (totalSpend > 100_000_000 ? 10 : totalSpend > 20_000_000 ? 5 : 0)
+                )
+            },
+            {
+                id: 'lcc',
+                name: 'Low-cost country (LCC) sourcing',
+                color: '#0e7490',
+                // Relevant for direct spend + single source; not relevant for domestic service spend
+                probability: clamp(
+                    15
+                    + (directPct > 50 ? 20 : directPct > 25 ? 10 : 0)
+                    + (singleSourcingPct > 40 ? 15 : singleSourcingPct > 20 ? 8 : 0)
+                    + (hasPriceVarianceData ? 10 : 0)
+                    + (isHighValueCurrency ? -5 : 5)  // USD/GBP orgs already global; INR orgs may benefit more
+                )
+            },
+            {
+                id: 'pay',
+                name: 'Payment terms optimisation',
+                color: '#2dd4bf',
+                // Strongest when risky payment terms (immediate / cash / net-7) are widespread
+                probability: clamp(
+                    20
+                    + (ptRiskPct > 30 ? 40 : ptRiskPct > 15 ? 25 : ptRiskPct > 5 ? 12 : 0)
+                    + (uncontractedPct > 50 ? 10 : uncontractedPct > 30 ? 5 : 0)  // off-contract = terms not locked ↑
+                    + (totalSpend > 5_000_000 ? 8 : 0)
+                )
+            }
+        ].sort((a, b) => b.probability - a.probability);
 
         return {
             filteredRows, // Expose for export
@@ -781,7 +992,10 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                     id: 'compliance',
                     icon: ShieldCheck,
                     label: 'Contract Compliance',
-                    value: contractedPercent,
+                    // Fall back to saved contractedPercent when live rows aren't loaded yet
+                    value: hasLiveRows
+                        ? contractedPercent
+                        : (restoredStats?.contractedPercent ?? restoredAnalysis?.contractedPercent ?? contractedPercent),
                     type: 'percent',
                     color: 'emerald',
                     subMetrics: [
@@ -844,13 +1058,47 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                     id: 'duplicates',
                     icon: Database,
                     label: 'Duplicate Transactions',
-                    value: restoredStats?.duplicateCount || 0,
+                    value: (() => {
+                        // Compute from live rows when available; fall back to stored restoredStats
+                        if (filteredRows.length > 0) {
+                            const hashSet: Record<string, number> = {};
+                            filteredRows.forEach(r => {
+                                const key = `${String(r[supplierCol] || '')}|${String(r[amountCol] || '')}|${String(r[dateCol] || '')}`.toLowerCase();
+                                hashSet[key] = (hashSet[key] || 0) + 1;
+                            });
+                            return Object.values(hashSet).filter(c => c > 1).reduce((sum, c) => sum + (c - 1), 0);
+                        }
+                        return restoredStats?.duplicateCount || 0;
+                    })(),
                     type: 'number',
-                    color: (restoredStats?.duplicateCount || 0) > 0 ? 'rose' : 'emerald',
+                    color: ((restoredStats?.duplicateCount || 0) > 0 || filteredRows.length > 0) ? 'rose' : 'emerald',
                     subMetrics: [
-                        { label: 'Flagged for Review', value: restoredStats?.duplicateCount || 0, type: 'number' }
+                        {
+                            label: 'Flagged for Review', value: (() => {
+                                if (filteredRows.length > 0) {
+                                    const hashSet: Record<string, number> = {};
+                                    filteredRows.forEach(r => {
+                                        const key = `${String(r[supplierCol] || '')}|${String(r[amountCol] || '')}|${String(r[dateCol] || '')}`.toLowerCase();
+                                        hashSet[key] = (hashSet[key] || 0) + 1;
+                                    });
+                                    return Object.values(hashSet).filter(c => c > 1).reduce((sum, c) => sum + (c - 1), 0);
+                                }
+                                return restoredStats?.duplicateCount || 0;
+                            })(), type: 'number'
+                        }
                     ],
-                    data: null // No drilldown for restored dups currently
+                    data: (() => {
+                        if (!filteredRows.length) return null;
+                        const hashSet: Record<string, number> = {};
+                        filteredRows.forEach(r => {
+                            const key = `${String(r[supplierCol] || '')}|${String(r[amountCol] || '')}|${String(r[dateCol] || '')}`.toLowerCase();
+                            hashSet[key] = (hashSet[key] || 0) + 1;
+                        });
+                        return filteredRows.filter(r => {
+                            const key = `${String(r[supplierCol] || '')}|${String(r[amountCol] || '')}|${String(r[dateCol] || '')}`.toLowerCase();
+                            return (hashSet[key] || 0) > 1;
+                        });
+                    })()
                 }
             ],
             opportunities: clusters
@@ -869,8 +1117,13 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                 .slice(0, 5),
             categoryData,
             identifiedSavings,
+            isSyntheticFallback,
+            // FIX 6: Quick-win and strategic split use effectiveBreakdown so they show
+            // restored saved values on re-login (when live rows are not yet loaded).
+            quickWinSavings: effectiveBreakdown.priceVariance + effectiveBreakdown.processEfficiency,
+            strategicSavings: effectiveBreakdown.compliance + effectiveBreakdown.singleSource + effectiveBreakdown.tailSpend,
             savingsLevers,
-            savingsBreakdown,
+            savingsBreakdown: effectiveBreakdown,
             // Internal structures needed for export
             itemMap,
             supplierSummaryBySpend
@@ -880,16 +1133,37 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
 
 
     const handleExportExcel = async () => {
-        const rowsToExport = dynamicStats?.filteredRows || data;
+        // EXPORT FIX B: Three-tier fallback so admin/enterprise users are never blocked:
+        //   1. filteredRows from the active date/filter selection (most specific)
+        //   2. data prop — the processed rows from projectData.raw in ProjectView
+        //   3. restoredAnalysis?.raw — for legacy projects that stored rows inside latestAnalysis
+        const rowsToExport =
+            (dynamicStats?.filteredRows?.length ? dynamicStats.filteredRows : null) ||
+            (data?.length ? data : null) ||
+            (restoredAnalysis?.raw?.length ? restoredAnalysis.raw : null);
+
         if (!rowsToExport || rowsToExport.length === 0) {
-            alert("No data available to export.");
+            alert("No data available to export. The project data may still be loading — please wait a moment and try again.");
             return;
         }
 
         setIsGeneratingPDF(true);
 
         try {
-            const generator = new ExcelGenerator(rowsToExport, mappings, currency);
+            console.log('[Export] rowsToExport length:', rowsToExport?.length);
+            console.log('[Export] Mappings used:', mappings);
+
+            // EXPORT FIX C: Use smart auto-detection for exports too.
+            // This ensures that even if Step 2 was skipped or minimal, 
+            // the ExcelGenerator can still find the keys it needs for summaries.
+            const baseMappings = (mappings && Object.keys(mappings).length > 0)
+                ? mappings
+                : (restoredAnalysis?.mappings ?? {});
+
+            const resolvedMappings = getAutoMappings(rowsToExport, baseMappings);
+            const resolvedCurrency = currency || restoredAnalysis?.currency || 'INR';
+
+            const generator = new ExcelGenerator(rowsToExport, resolvedMappings, resolvedCurrency);
             const blob = await generator.generate();
 
             // 2. Create Download Link
@@ -897,18 +1171,21 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
             const link = document.createElement("a");
             const filename = `Procurement_Analysis_${new Date().toISOString().split('T')[0]}.xlsx`;
 
-            link.setAttribute("href", url);
+            link.style.display = 'none'; // Ensure invisible
+            link.href = url;
             link.setAttribute("download", filename);
             document.body.appendChild(link);
 
-            // 3. Trigger Download (existing behaviour — unchanged)
-            link.click();
-            document.body.removeChild(link);
-            URL.revokeObjectURL(url);
+            // 3. Trigger Download (added slight delay for browser stability)
+            setTimeout(() => {
+                link.click();
+                document.body.removeChild(link);
+                window.URL.revokeObjectURL(url);
+            }, 100);
 
-            // 4. Persist to Firebase Storage + Firestore (non-fatal, additive) — only if not in admin view mode
+            // 4. Persist to Firebase Storage + Firestore (non-fatal, additive)
             let fileUrl: string | undefined;
-            if (effectiveUid && db && storage && !isViewingClient) {
+            if (effectiveUid && db && storage) {
                 try {
                     const storagePath = `exports/${effectiveUid}/${Date.now()}_${filename}`;
                     const storageRef = ref(storage, storagePath);
@@ -1003,14 +1280,14 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
 
                     <button
                         onClick={() => canExport ? handleExportExcel() : setIsUnlockModalOpen(true)}
-                        disabled={isGeneratingPDF}
+                        disabled={isGeneratingPDF || isLoading}
                         className={cn(
                             "bg-white hover:bg-zinc-200 text-black px-6 py-3 rounded-2xl font-bold flex items-center gap-2 transition-all shadow-xl shadow-white/5 active:scale-[0.98]",
-                            isGeneratingPDF && "opacity-70 cursor-not-allowed",
+                            (isGeneratingPDF || isLoading) && "opacity-70 cursor-not-allowed",
                             !canExport && "bg-zinc-100"
                         )}
                     >
-                        {isGeneratingPDF ? (
+                        {isGeneratingPDF || isLoading ? (
                             <Loader2 className="h-4 w-4 animate-spin" />
                         ) : (
                             <>
@@ -1018,7 +1295,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                 <Download className="h-4 w-4" />
                             </>
                         )}
-                        {canExport ? "Export Analysis (Excel)" : "Unlock Export (Enterprise)"}
+                        {isLoading ? "Syncing Full Dataset..." : (canExport ? "Export Analysis (Excel)" : "Unlock Export (Enterprise)")}
                     </button>
 
                     <button
@@ -1670,32 +1947,44 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                         "bg-primary/5 border border-primary/20 rounded-3xl p-8 border-b-4 border-b-primary transition-all",
                                         !checkAccess('savings_roi') && "blur-xl pointer-events-none select-none opacity-50"
                                     )}>
-                                        <span className="text-[10px] font-black text-primary uppercase tracking-widest mb-4 block">Total Potential ROI</span>
+                                        <div className="flex items-center gap-2 mb-4">
+                                            <span className="text-[10px] font-black text-primary uppercase tracking-widest block">Total Potential ROI</span>
+                                            {dynamicStats.isSyntheticFallback && (
+                                                <span className="text-[9px] font-black bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2 py-0.5 rounded-full uppercase tracking-widest">Estimated</span>
+                                            )}
+                                        </div>
                                         <div className="text-4xl font-black text-white mb-2">{formatCurrency(dynamicStats.identifiedSavings)}</div>
-                                        <p className="text-xs text-zinc-500">Based on variant consolidation & category benchmarks</p>
+                                        <p className="text-xs text-zinc-500">
+                                            {dynamicStats.isSyntheticFallback
+                                                ? 'Restored from prior analysis — upload live data for row-level calculations'
+                                                : 'Calculated row-by-row across 5 procurement levers'}
+                                        </p>
                                     </div>
                                     <div className={cn(
                                         "bg-emerald-500/5 border border-emerald-500/20 rounded-3xl p-8 border-b-4 border-b-emerald-500 transition-all",
                                         !checkAccess('savings_roi') && "blur-xl pointer-events-none select-none opacity-50"
                                     )}>
                                         <span className="text-[10px] font-black text-emerald-500 uppercase tracking-widest mb-4 block">Quick-Win Savings</span>
-                                        <div className="text-4xl font-black text-white mb-2">{formatCurrency(dynamicStats.identifiedSavings * 0.3)}</div>
-                                        <p className="text-xs text-zinc-500">Immediate opportunities through duplicate vendor removal</p>
+                                        {/* FIX 6: Driven by Price Arbitrage + Process Efficiency breakdown */}
+                                        <div className="text-4xl font-black text-white mb-2">{formatCurrency(dynamicStats.quickWinSavings)}</div>
+                                        <p className="text-xs text-zinc-500">Price arbitrage &amp; process efficiency (actionable now)</p>
                                     </div>
                                     <div className={cn(
                                         "bg-amber-500/5 border border-amber-500/20 rounded-3xl p-8 border-b-4 border-b-amber-500 transition-all",
                                         !checkAccess('savings_roi') && "blur-xl pointer-events-none select-none opacity-50"
                                     )}>
                                         <span className="text-[10px] font-black text-amber-500 uppercase tracking-widest mb-4 block">Strategic Pipeline</span>
-                                        <div className="text-4xl font-black text-white mb-2">{formatCurrency(dynamicStats.identifiedSavings * 0.7)}</div>
-                                        <p className="text-xs text-zinc-500">Medium-term savings via contract consolidation</p>
+                                        {/* FIX 6: Driven by Contract Compliance + Single Source + Tail Consolidation */}
+                                        <div className="text-4xl font-black text-white mb-2">{formatCurrency(dynamicStats.strategicSavings)}</div>
+                                        <p className="text-xs text-zinc-500">Contract renegotiation, sourcing &amp; tail consolidation</p>
                                     </div>
                                 </div>
 
                                 <div className="space-y-6">
                                     <div className="flex items-center justify-between">
                                         <h4 className="text-lg font-bold text-white uppercase tracking-tighter">Top 3 Savings Opportunities</h4>
-                                        <span className="text-zinc-500 text-[10px] font-bold uppercase tracking-widest">Ranked by absolute INR value</span>
+                                        {/* FIX 10: Currency label is now dynamic */}
+                                        <span className="text-zinc-500 text-[10px] font-bold uppercase tracking-widest">Ranked by absolute {currency} value</span>
                                     </div>
 
                                     <div className="grid grid-cols-1 gap-4">
@@ -1953,6 +2242,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                             color={drilldownKpi.color === 'rose' ? 'rose' : drilldownKpi.color === 'amber' ? 'amber' : 'primary'}
                             userId={effectiveUid ?? undefined}
                             projectId={currentProject?.id}
+                            currency={currency}
                         />
                     )
                 }

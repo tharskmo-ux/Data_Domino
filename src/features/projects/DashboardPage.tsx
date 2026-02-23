@@ -10,7 +10,8 @@ import {
     Trash2,
     Target,
     Users,
-    LogOut
+    LogOut,
+    Loader2
 } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';
 import { useProjects, normalizeProject } from './ProjectContext';
@@ -49,6 +50,7 @@ const DashboardPage = () => {
     const [showResumePrompt, setShowResumePrompt] = useState(false);
     const [resumeStep, setResumeStep] = useState<string | number>(0);
     const [isLimitReached, setIsLimitReached] = useState(false);
+    const [isCreating, setIsCreating] = useState(false);
 
     const effectiveUid = useEffectiveUid();
 
@@ -58,6 +60,7 @@ const DashboardPage = () => {
     useEffect(() => {
         const cleanupAbandonedProjects = async (uid: string) => {
             try {
+                // EXPORT FIX C: Use smart auto-detection for exports too.
                 const allProjectsQuery = query(
                     collection(db, 'projects'),
                     where('userId', '==', uid)
@@ -90,11 +93,17 @@ const DashboardPage = () => {
 
     useEffect(() => {
         if (effectiveRole === 'trial' && effectiveUid) {
-            checkTrialLimit(effectiveUid).then(reached => setIsLimitReached(reached));
+            // Check based on both the loaded projects list AND the backend check for safety
+            const localLimit = projects.length >= 1;
+            if (localLimit) {
+                setIsLimitReached(true);
+            } else {
+                checkTrialLimit(effectiveUid).then(reached => setIsLimitReached(reached));
+            }
         } else {
             setIsLimitReached(false);
         }
-    }, [effectiveUid, effectiveRole, checkTrialLimit]);
+    }, [effectiveUid, effectiveRole, checkTrialLimit, projects.length]);
 
     useEffect(() => {
         const params = new URLSearchParams(window.location.search);
@@ -133,7 +142,12 @@ const DashboardPage = () => {
             if (!snapshot.empty) {
                 // Map, filter step 0, sort manually, then limit to latest 10
                 let projectsData = snapshot.docs
-                    .map(d => normalizeProject(d.data(), d.id.split('_')[1] || d.id))
+                    .map(d => {
+                        // Doc IDs are "{uid}_{projectId}" — slice from first underscore
+                        const rawId = d.id;
+                        const projectId = rawId.includes('_') ? rawId.slice(rawId.indexOf('_') + 1) : rawId;
+                        return normalizeProject(d.data(), projectId);
+                    })
                     .filter(p => !p.currentStep || (typeof p.currentStep === 'number' && p.currentStep >= 1) || (typeof p.currentStep === 'string' && p.currentStep !== 'upload'))
                     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
@@ -142,12 +156,9 @@ const DashboardPage = () => {
 
                 setProjects(projectsData);
 
+                console.log('[Dashboard] Projects Data synced:', projectsData.length);
+
                 const latest = projectsData[0] as any;
-                if (latest && latest.latestAnalysis) {
-                    setTotalSpend(latest.latestAnalysis.totalSpend ?? 0);
-                    setSavingsPotentialMax(latest.latestAnalysis.savingsPotentialMax ?? 0);
-                    setUniqueVendors(latest.latestAnalysis.uniqueVendors ?? 0);
-                }
 
                 if (latest && latest.status !== 'data_quality_complete' && latest.currentStep > 0) {
                     setShowResumePrompt(true);
@@ -166,6 +177,27 @@ const DashboardPage = () => {
         return () => unsubscribe();
     }, [effectiveUid]);
 
+    // Phase 13: Robust Stats Aggregation using useMemo
+    useEffect(() => {
+        if (!projects || projects.length === 0) {
+            setTotalSpend(0);
+            setSavingsPotentialMax(0);
+            setUniqueVendors(0);
+            return;
+        }
+
+        const aggregated = projects.reduce((acc, p) => ({
+            spend: acc.spend + (p.stats?.spend || 0),
+            savings: acc.savings + (p.stats?.savingsPotential || 0),
+            vendors: acc.vendors + (p.stats?.suppliersCount || 0)
+        }), { spend: 0, savings: 0, vendors: 0 });
+
+        setTotalSpend(aggregated.spend);
+        setSavingsPotentialMax(aggregated.savings);
+        setUniqueVendors(aggregated.vendors);
+        console.log('[Dashboard] Aggregated Stats (useMemo-ish):', aggregated);
+    }, [projects]);
+
     // If a project is selected, show the project workspace instead of the dashboard
     if (currentProject) {
         return <ProjectView key={currentProject.id} />;
@@ -179,8 +211,16 @@ const DashboardPage = () => {
         signOut(auth);
     };
 
-    const handleCreateProject = (data: { name: string, description: string, template: string }) => {
-        createProject(data);
+    // FIX 4: Return the Promise from createProject so CreateProjectModal can await it before closing.
+    // This eliminates the 800 ms setTimeout race-condition that caused the modal to close before
+    // setCurrentProject resolved, leaving the user on the dashboard instead of the FileUpload screen.
+    const handleCreateProject = async (data: { name: string, description: string, template: string }): Promise<void> => {
+        setIsCreating(true);
+        try {
+            await createProject(data);
+        } finally {
+            setIsCreating(false);
+        }
     };
 
     return (
@@ -320,20 +360,22 @@ const DashboardPage = () => {
                                     </div>
                                     <button
                                         onClick={() => isLimitReached ? window.open('https://enalsys.com/contact', '_blank') : setIsModalOpen(true)}
+                                        disabled={isCreating}
                                         className={cn(
                                             "group px-6 py-2.5 rounded-xl font-bold flex items-center gap-2 transition-all shadow-lg",
-                                            (effectiveRole === 'trial' && isLimitReached && !isAdmin)
+                                            (effectiveRole === 'trial' && isLimitReached)
                                                 ? "bg-amber-500/20 text-amber-400 border border-amber-500/30 hover:bg-amber-500/30"
-                                                : "bg-primary hover:bg-primary/90 text-white shadow-primary/20 hover:shadow-primary/30"
+                                                : "bg-primary hover:bg-primary/90 text-white shadow-primary/20 hover:shadow-primary/30",
+                                            isCreating && "opacity-50 cursor-not-allowed"
                                         )}
                                     >
                                         <div className={cn(
                                             "p-1 rounded-lg transition-transform",
-                                            (effectiveRole === 'trial' && isLimitReached && !isAdmin) ? "bg-amber-500/20" : "bg-white/20 group-hover:scale-110"
+                                            (effectiveRole === 'trial' && isLimitReached) ? "bg-amber-500/20" : "bg-white/20 group-hover:scale-110"
                                         )}>
-                                            <Plus className="h-4 w-4" />
+                                            {isCreating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
                                         </div>
-                                        {(effectiveRole === 'trial' && isLimitReached && !isAdmin) ? 'Upgrade to Enterprise' : 'Create New Project'}
+                                        {isCreating ? 'Creating...' : (effectiveRole === 'trial' && isLimitReached) ? 'Upgrade to Enterprise' : 'Create New Project'}
                                     </button>
                                 </div>
 
@@ -537,10 +579,13 @@ const DashboardPage = () => {
             </div>
 
 
+            {/* FIX 8: Pass canCreate so the modal uses checkTrialLimit (completed projects only)
+                 rather than the total project count which would block on empty drafts. */}
             <CreateProjectModal
                 isOpen={isModalOpen}
                 onClose={() => setIsModalOpen(false)}
                 onCreate={handleCreateProject}
+                canCreate={!isLimitReached || isAdmin}
             />
 
             {/* Client Files Panel — dynamically handles admin vs enterprise view internally */}

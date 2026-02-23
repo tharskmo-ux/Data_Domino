@@ -10,7 +10,7 @@ import {
     Search
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
-import { collection, query, where, orderBy, onSnapshot } from 'firebase/firestore';
+import { collection, query, where, onSnapshot } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { useEffectiveUid } from '../../hooks/useEffectiveUid';
 
@@ -86,7 +86,11 @@ const SkeletonRow = () => (
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-const ActivityHistory: React.FC = () => {
+interface ActivityHistoryProps {
+    projectId: string;
+}
+
+const ActivityHistory: React.FC<ActivityHistoryProps> = ({ projectId }) => {
     const effectiveUid = useEffectiveUid();
     const [activityHistory, setActivityHistory] = useState<FlatActivity[]>([]);
     const [uploads, setUploads] = useState<FlatActivity[]>([]);
@@ -94,18 +98,21 @@ const ActivityHistory: React.FC = () => {
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
-        if (!effectiveUid) return;
+        if (!effectiveUid || !projectId) {
+            setLoading(false);
+            return;
+        }
 
         const uploadsQuery = query(
             collection(db, 'uploads'),
             where('userId', '==', effectiveUid),
-            orderBy('uploadedAt', 'desc')
+            where('projectId', '==', projectId)
         );
 
         const exportsQuery = query(
             collection(db, 'exports'),
             where('userId', '==', effectiveUid),
-            orderBy('exportedAt', 'desc')
+            where('projectId', '==', projectId)
         );
 
         const unsubUploads = onSnapshot(uploadsQuery, (snap) => {
@@ -144,7 +151,7 @@ const ActivityHistory: React.FC = () => {
             unsubUploads();
             unsubExports();
         };
-    }, [effectiveUid]);
+    }, [effectiveUid, projectId]);
 
     useEffect(() => {
         const combined = [...uploads, ...exports].sort((a, b) => {

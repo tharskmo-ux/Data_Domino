@@ -5,41 +5,43 @@ import { cn } from '../../lib/utils';
 interface CreateProjectModalProps {
     isOpen: boolean;
     onClose: () => void;
-    onCreate: (project: { name: string, description: string, template: string }) => void;
+    // FIX 4: onCreate now returns Promise<void> so handleSubmit can await it before closing
+    onCreate: (project: { name: string, description: string, template: string }) => Promise<void>;
+    // FIX 8: Parent passes the resolved gate flag so we don't call checkTrialLimit inside the modal
+    canCreate?: boolean;
 }
 
 import { useSubscription } from '../subscription/SubscriptionContext';
-import { useProjects } from './ProjectContext';
 import { Lock } from 'lucide-react';
 import { ENALSYS_EMAIL } from '../../lib/constants';
 
-const CreateProjectModal: React.FC<CreateProjectModalProps> = ({ isOpen, onClose, onCreate }) => {
+const CreateProjectModal: React.FC<CreateProjectModalProps> = ({ isOpen, onClose, onCreate, canCreate }) => {
     const [name, setName] = useState('');
     const [description, setDescription] = useState('');
     const [template, setTemplate] = useState('custom');
     const [loading, setLoading] = useState(false);
 
-    // Feature Gating
+    // FIX 8: If the parent did not supply canCreate (backwards compat), fall back to
+    // the subscription gate. This keeps old call-sites working without changes.
     const { checkAccess } = useSubscription();
-    // Reverted to active project count as per user request
-    const { projects } = useProjects();
-    const canCreateProject = checkAccess('unlimited_projects') || projects.length < 1;
+    const canCreateProject = canCreate !== undefined ? canCreate : checkAccess('unlimited_projects');
 
     if (!isOpen) return null;
 
-    const handleSubmit = (e: React.FormEvent) => {
+    // FIX 4: async handleSubmit — awaits the Firestore write + setCurrentProject before closing
+    const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         setLoading(true);
-        // Simulate API call
-        setTimeout(() => {
-            onCreate({ name, description, template });
+        try {
+            await onCreate({ name, description, template });
+        } finally {
             setLoading(false);
             onClose();
             // Reset form
             setName('');
             setDescription('');
             setTemplate('custom');
-        }, 800);
+        }
     };
 
     if (!canCreateProject) {

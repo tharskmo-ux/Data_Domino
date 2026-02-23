@@ -72,17 +72,18 @@ export const SubscriptionProvider: React.FC<{ children: React.ReactNode }> = ({ 
                     setOrganization(orgSnap.data() as Organization);
                 } else {
                     // Auto-create Free Org for new user
-                    const userName = user.email ? user.email.split('@')[0] : 'user';
+                    // HIGH-02 FIX: Prevent admin email injection when impersonating clients.
+                    // If effectiveUid !== user.uid, we are impersonating. 
+                    const isImpersonating = user.uid !== effectiveUid;
 
                     const newOrg: Organization = {
                         id: effectiveUid,
-                        // Step 2: User's displayName if available, falling back to email prefix
-                        name: user?.displayName || user?.email?.split('@')[0] || 'Workspace',
-                        companyName: "", // Default to empty string
-                        userName,
-                        displayName: user?.displayName || null,
+                        name: isImpersonating ? 'Client Workspace' : (user?.displayName || user?.email?.split('@')[0] || 'Workspace'),
+                        companyName: "",
+                        userName: isImpersonating ? 'client' : (user.email ? user.email.split('@')[0] : 'user'),
+                        displayName: isImpersonating ? null : (user?.displayName || null),
                         adminId: effectiveUid,
-                        adminEmail: user?.email || '',
+                        adminEmail: isImpersonating ? '' : (user?.email || ''),
                         createdAt: Timestamp.now(),
                         members: [effectiveUid],
                         subscription: {

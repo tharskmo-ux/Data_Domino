@@ -64,6 +64,41 @@ const AppSidebar: React.FC<AppSidebarProps> = ({ activeStep, onNavigate, current
         },
     ];
 
+    // CRITICAL-01 FIX: Compute step completion at the top level of the component (not inside .map())
+    const completedSteps = React.useMemo(() => {
+        const completed = new Set<string>();
+        if (!currentProject) return completed;
+        const statusOrder = ['header_selected', 'mapped', 'matched', 'categorized', 'data_quality_complete'];
+        const stepToStatus: Record<string, string[]> = {
+            'header-selection': ['header_selected', 'mapped', 'matched', 'categorized', 'data_quality_complete'],
+            'mapping': ['mapped', 'matched', 'categorized', 'data_quality_complete'],
+            'matching': ['matched', 'categorized', 'data_quality_complete'],
+            'categorization': ['categorized', 'data_quality_complete'],
+            'data-quality': ['data_quality_complete'],
+        };
+        for (const [step, requiredStatuses] of Object.entries(stepToStatus)) {
+            if (requiredStatuses.includes(currentProject.status)) {
+                completed.add(step);
+            }
+        }
+        // Also mark the active step if user has gone past it
+        const activeIdx = statusOrder.indexOf(currentProject.status);
+        if (activeStep && activeStep !== 'dashboard' && activeStep !== 'history') {
+            const stepStatusMap: Record<string, number> = {
+                'header-selection': 0,
+                'mapping': 1,
+                'matching': 2,
+                'categorization': 3,
+                'data-quality': 4,
+            };
+            const activeStepIdx = stepStatusMap[activeStep] ?? -1;
+            if (activeIdx > activeStepIdx) {
+                completed.add(activeStep);
+            }
+        }
+        return completed;
+    }, [currentProject, activeStep]);
+
     return (
         <aside className="w-80 border-r border-zinc-900 bg-zinc-900/30 flex flex-col h-screen fixed left-0 top-0 z-40 backdrop-blur-md">
             <div className="p-6 border-b border-zinc-900 flex items-center gap-3 h-20 shrink-0">
@@ -105,32 +140,7 @@ const AppSidebar: React.FC<AppSidebarProps> = ({ activeStep, onNavigate, current
                 {steps.map((step) => {
                     const isActive = activeStep === step.id;
                     const StepIcon = step.icon;
-
-                    // Determine if step is completed
-                    const isCompleted = React.useMemo(() => {
-                        if (!currentProject) return false;
-                        if (currentProject.status === 'completed') return true;
-
-                        // Check explicit activity history
-                        const hasActivity = currentProject.activities.some(a => {
-                            if (step.id === 'header-selection') return a.type === 'header-selection' || a.type === 'mapping';
-                            if (step.id === 'mapping') return a.type === 'mapping';
-                            if (step.id === 'matching') return a.type === 'matching';
-                            if (step.id === 'categorization') return a.type === 'categorization';
-                            if (step.id === 'data-quality') return a.type === 'categorization' && steps.findIndex(s => s.id === 'data-quality') < steps.findIndex(s => s.id === activeStep); // Rough proxy
-                            return false;
-                        });
-
-                        // Sequence-based inference (if we are on step 4, step 1,2,3 are done)
-                        const stepIndex = steps.findIndex(s => s.id === step.id);
-                        const currentIndex = steps.findIndex(s => s.id === activeStep);
-
-                        // Special Handling: Dashboard is the final goal
-                        if (step.id === 'dashboard') return false;
-                        if (step.id === 'data-quality') return false;
-
-                        return hasActivity || (stepIndex < currentIndex && currentIndex > 0);
-                    }, [currentProject, activeStep, step.id]);
+                    const isCompleted = completedSteps.has(step.id);
 
                     return (
                         <button

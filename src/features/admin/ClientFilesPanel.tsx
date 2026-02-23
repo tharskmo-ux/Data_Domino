@@ -3,6 +3,7 @@ import { collection, query, where, onSnapshot, orderBy } from 'firebase/firestor
 import { db } from '../../lib/firebase';
 import { useAdminView } from './AdminViewContext';
 import { useAuth } from '../auth/AuthContext';
+import { useEffectiveUid } from '../../hooks/useEffectiveUid';
 import { Download, FileText, FolderOpen } from 'lucide-react';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -18,6 +19,7 @@ interface UploadRecord {
     duplicateCount?: number;
     fileUrl?: string;
     fileSizeMB?: number;
+    categoryResultsUrl?: string;
 }
 
 interface ExportRecord {
@@ -100,13 +102,23 @@ const UploadRow: React.FC<{ record: UploadRecord }> = ({ record }) => (
                 </div>
             </div>
         </div>
-        <button
-            onClick={() => record.fileUrl && window.open(record.fileUrl, '_blank')}
-            disabled={!record.fileUrl}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-lg text-xs font-bold transition-all border border-zinc-700 hover:border-zinc-600 disabled:opacity-40 shrink-0"
-        >
-            <Download className="h-3 w-3" /> Download Original
-        </button>
+        <div className="flex flex-col gap-2 shrink-0">
+            <button
+                onClick={() => record.fileUrl && window.open(record.fileUrl, '_blank')}
+                disabled={!record.fileUrl}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-lg text-xs font-bold transition-all border border-zinc-700 hover:border-zinc-600 disabled:opacity-40"
+            >
+                <Download className="h-3 w-3" /> Original File
+            </button>
+            {record.categoryResultsUrl && (
+                <button
+                    onClick={() => window.open(record.categoryResultsUrl, '_blank')}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 rounded-lg text-xs font-bold transition-all border border-emerald-500/30"
+                >
+                    <Download className="h-3 w-3" /> Processed Data (JSON)
+                </button>
+            )}
+        </div>
     </div>
 );
 
@@ -136,11 +148,7 @@ const ExportRow: React.FC<{ record: ExportRecord }> = ({ record }) => (
 const ClientFilesPanel: React.FC = () => {
     const { role } = useAuth();
     const { isViewingClient, viewingClient } = useAdminView();
-    const effectiveUid = useAuth().user?.uid;
-
-    // In admin view, effectiveUid needs to point to the client, but useAuth provides the admin.
-    // Let's use a safe fallback: if viewing client, use that, otherwise use own auth uid.
-    const uidToQuery = (isViewingClient && viewingClient) ? viewingClient.uid : effectiveUid;
+    const uidToQuery = useEffectiveUid();
 
     const [uploads, setUploads] = useState<UploadRecord[]>([]);
     const [exports, setExports] = useState<ExportRecord[]>([]);
@@ -173,6 +181,7 @@ const ClientFilesPanel: React.FC = () => {
                 duplicateCount: doc.data().duplicateCount,
                 fileUrl: doc.data().fileUrl,
                 fileSizeMB: doc.data().fileSizeMB,
+                categoryResultsUrl: doc.data().analysis?.categoryResultsUrl,
             }));
             setUploads(uDocs);
             setLoading(false);

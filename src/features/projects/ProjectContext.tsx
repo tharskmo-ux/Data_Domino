@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import { useEffectiveUid } from '../../hooks/useEffectiveUid';
 import { db } from '../../lib/firebase';
 import {
@@ -12,6 +12,8 @@ import {
     serverTimestamp,
     getDoc
 } from 'firebase/firestore';
+import { useAuth } from '../auth/AuthContext';
+import { useAdminView } from '../admin/AdminViewContext';
 
 
 export interface Project {
@@ -53,12 +55,14 @@ export interface Project {
     dataQualityResults?: any;
     latestAnalysis?: any;
     rawGridUrl?: string;
+    categoryResultsUrl?: string;
     finalizedAt?: string;
 }
 
 interface ProjectContextType {
     projects: Project[];
-    createProject: (data: { name: string, description: string, template: string }) => void;
+    // FIX 4: Promise<void> return type so CreateProjectModal can await the Firestore write
+    createProject: (data: { name: string, description: string, template: string }) => Promise<void>;
     updateProject: (id: string, updates: Partial<Project>) => void;
     deleteProject: (id: string) => void;
     currentProject: Project | null;
@@ -121,8 +125,9 @@ export const normalizeProject = (data: any, projectUuid: string): Project => {
             details: String(act.details || ''),
             metadata: act.metadata || {}
         })),
-        // Pipeline Persitence Restoration
-        currentStep: data.currentStep !== undefined ? data.currentStep : (data.latestAnalysis ? 'completed' : 'upload'),
+        // Pipeline Persistence Restoration
+        // FIX 3: Use numeric values (0 = new, 6 = done) so Number() never produces NaN
+        currentStep: data.currentStep !== undefined ? data.currentStep : (data.latestAnalysis ? 6 : 0),
         uploadId: data.uploadId || la.uploadId,
         fileName: data.fileName || la.fileName,
         rowCount: cleanNum(data.rowCount || la.rowCount),
@@ -136,16 +141,23 @@ export const normalizeProject = (data: any, projectUuid: string): Project => {
         dataQualityResults: data.dataQualityResults || null,
         latestAnalysis: data.latestAnalysis || null,
         rawGridUrl: data.rawGridUrl || null,
+        categoryResultsUrl: data.categoryResultsUrl || null,
         finalizedAt: normalizeDate(data.finalizedAt)
     };
 };
 
 export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+    const { role, isAdmin } = useAuth();
+    const { isViewingClient, viewingClient } = useAdminView();
     const effectiveUid = useEffectiveUid();
+
+    // Determine the effective role for limit checks
+    const effectiveRole = (isAdmin && isViewingClient && viewingClient) ? viewingClient.role : role;
     const [projects, setProjects] = useState<Project[]>([]);
     const [currentProject, setCurrentProject] = useState<Project | null>(null);
     const [projectDataCache, setProjectDataCache] = useState<Record<string, any>>({});
     const [lifetimeProjectCount, setLifetimeProjectCount] = useState(0);
+    const isCreatingRef = useRef(false);
 
     const updateProjectCache = (projectId: string, data: any) => {
         setProjectDataCache(prev => ({ ...prev, [projectId]: data }));
@@ -164,9 +176,13 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
                 const q = query(projectsRef, where('userId', '==', effectiveUid));
                 const querySnapshot = await getDocs(q);
 
-                const loadedProjects = querySnapshot.docs.map(doc =>
-                    normalizeProject(doc.data(), doc.id.split('_')[1] || doc.id)
-                );
+                const loadedProjects = querySnapshot.docs.map(doc => {
+                    // Doc IDs are "{uid}_{projectId}" — slice from first underscore to preserve
+                    // project IDs that might themselves contain underscores in future.
+                    const rawId = doc.id;
+                    const projectId = rawId.includes('_') ? rawId.slice(rawId.indexOf('_') + 1) : rawId;
+                    return normalizeProject(doc.data(), projectId);
+                });
 
                 setProjects(loadedProjects);
                 setLifetimeProjectCount(loadedProjects.length);
@@ -179,8 +195,26 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }, [effectiveUid]);
 
     const createProject = async (data: { name: string, description: string, template: string }) => {
-        if (!effectiveUid) return;
+        if (!effectiveUid || isCreatingRef.current) return;
 
+        // SAFEGUARD: Enforce trial limit — only Admin and Enterprise can bypass.
+        // This implicitly captures 'trial', 'none', and any other new role types.
+        if (effectiveRole !== 'admin' && effectiveRole !== 'enterprise') {
+            // First check local state for immediate feedback
+            if (projects.length >= 1) {
+                console.error('[ProjectContext] Trial limit reached (local).');
+                return;
+            }
+
+            // Then check backend to be absolutely sure (prevents bypass if local state is clearing)
+            const isLimitReached = await checkTrialLimit(effectiveUid);
+            if (isLimitReached) {
+                console.error('[ProjectContext] Trial limit reached (backend).');
+                return;
+            }
+        }
+
+        isCreatingRef.current = true;
         try {
             const projectId = Math.random().toString(36).substr(2, 9);
             const docId = `${effectiveUid}_${projectId}`;
@@ -189,6 +223,8 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
                 ...data,
                 createdAt: new Date().toISOString(),
                 status: 'draft',
+                // FIX 3: Explicitly set currentStep:0 so determineProjectState returns SHOW_UPLOAD immediately
+                currentStep: 0,
                 stats: { spend: 0, quality: 0, transactions: 0, categoriesCount: 0, suppliersCount: 0 },
                 activities: [{
                     id: Math.random().toString(36).substr(2, 5),
@@ -209,6 +245,8 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
             setCurrentProject(newProject);
         } catch (err) {
             console.error('[ProjectContext] Error creating project:', err);
+        } finally {
+            isCreatingRef.current = false;
         }
     };
 
@@ -258,16 +296,15 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
     };
 
     const checkTrialLimit = async (uid: string): Promise<boolean> => {
-        // Check completed projects only — not attempts
-        const completedQuery = query(
+        // Count ALL projects (drafts, in-progress, completed)
+        const allQuery = query(
             collection(db, 'projects'),
-            where('userId', '==', uid),
-            where('status', '==', 'data_quality_complete')
+            where('userId', '==', uid)
         );
-        const completedSnap = await getDocs(completedQuery);
+        const allSnap = await getDocs(allQuery);
 
-        // Trial users can complete 1 project
-        return completedSnap.size >= 1;
+        // Trial users can have exactly 1 project in existence
+        return allSnap.size >= 1;
     };
 
     const addActivity = async (projectId: string, activity: Omit<Project['activities'][0], 'id' | 'timestamp'>) => {
