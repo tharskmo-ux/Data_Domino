@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { collection, query, where, onSnapshot, orderBy } from 'firebase/firestore';
+import { collection, query, where, onSnapshot } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { useAdminView } from './AdminViewContext';
 import { useAuth } from '../auth/AuthContext';
@@ -159,14 +159,12 @@ const ClientFilesPanel: React.FC = () => {
 
         const uploadsQuery = query(
             collection(db, 'uploads'),
-            where('userId', '==', uidToQuery),
-            orderBy('uploadedAt', 'desc')
+            where('userId', '==', uidToQuery)
         );
 
         const exportsQuery = query(
             collection(db, 'exports'),
-            where('userId', '==', uidToQuery),
-            orderBy('exportedAt', 'desc')
+            where('userId', '==', uidToQuery)
         );
 
         const unsubUploads = onSnapshot(uploadsQuery, (snap) => {
@@ -183,6 +181,12 @@ const ClientFilesPanel: React.FC = () => {
                 fileSizeMB: doc.data().fileSizeMB,
                 categoryResultsUrl: doc.data().analysis?.categoryResultsUrl,
             }));
+            // Client-side sort safely avoids Firestore composite index missing crashes
+            uDocs.sort((a, b) => {
+                const tA = a.uploadedAt?.toMillis ? a.uploadedAt.toMillis() : new Date(a.uploadedAt || 0).getTime();
+                const tB = b.uploadedAt?.toMillis ? b.uploadedAt.toMillis() : new Date(b.uploadedAt || 0).getTime();
+                return tB - tA;
+            });
             setUploads(uDocs);
             setLoading(false);
         }, (err) => {
@@ -197,6 +201,11 @@ const ClientFilesPanel: React.FC = () => {
                 exportedAt: doc.data().exportedAt,
                 fileUrl: doc.data().fileUrl,
             }));
+            eDocs.sort((a, b) => {
+                const tA = a.exportedAt?.toMillis ? a.exportedAt.toMillis() : new Date(a.exportedAt || 0).getTime();
+                const tB = b.exportedAt?.toMillis ? b.exportedAt.toMillis() : new Date(b.exportedAt || 0).getTime();
+                return tB - tA;
+            });
             setExports(eDocs);
             setLoading(false);
         }, (err) => {

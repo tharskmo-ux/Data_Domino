@@ -814,20 +814,20 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
         // Lever signals — prefer live-computed values; fall back to saved signals from
         // latestAnalysis when no rows are in the filtered view (e.g. on first re-login).
         const spendConcentration = topSuppliers.slice(0, 5).reduce((acc, s) => acc + s.share, 0); // 0-100
-        const singleSourcingPct  = hasLiveRows
+        const singleSourcingPct = hasLiveRows
             ? sourcingData.singlePercent
             : (restoredStats?.singleSourcingPct ?? restoredAnalysis?.singleSourcingPct ?? 0);
-        const uncontractedPct    = hasLiveRows
+        const uncontractedPct = hasLiveRows
             ? (100 - contractedPercent)
             : (100 - (restoredStats?.contractedPercent ?? restoredAnalysis?.contractedPercent ?? contractedPercent));
-        const ptRiskPct          = hasLiveRows
+        const ptRiskPct = hasLiveRows
             ? (totalSpend > 0 ? (stats.ptRiskSpend / totalSpend) * 100 : 0)
             : (restoredStats?.ptRiskPercent ?? restoredAnalysis?.ptRiskPercent ?? 0);
         const tailSpendPctSignal = hasLiveRows
             ? tailSpendPercentage
             : (restoredStats?.tailSpendPct ?? restoredAnalysis?.tailSpendPct ?? tailSpendPercentage);
-        const directPct          = spendTypeData.find(s => s.name === 'Direct')?.value ?? 0;       // 0-100
-        const buDiversity        = Object.keys(buMap).length;                                      // integer
+        const directPct = spendTypeData.find(s => s.name === 'Direct')?.value ?? 0;       // 0-100
+        const buDiversity = Object.keys(buMap).length;                                      // integer
 
         // Signal: whether meaningful price-variance data exists across multi-source items
         const hasPriceVarianceData = effectiveBreakdown.priceVariance > 0;
@@ -977,12 +977,12 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                     id: 'sourcing',
                     icon: Share2,
                     label: 'Sourcing Strategy',
-                    value: isItemMapped ? '' : 'N/A',
+                    value: (isItemMapped || !hasLiveRows) ? '' : 'N/A',
                     type: 'raw',
-                    color: isItemMapped ? 'emerald' : 'zinc',
-                    topDistribution: isItemMapped ? [
-                        { name: 'Single Source', share: sourcingData.singlePercent },
-                        { name: 'Multi Source', share: sourcingData.multiPercent }
+                    color: (isItemMapped || !hasLiveRows) ? 'emerald' : 'zinc',
+                    topDistribution: (isItemMapped || !hasLiveRows) ? [
+                        { name: 'Single Source', share: hasLiveRows ? sourcingData.singlePercent : (restoredStats?.singleSourcingPct ?? 0) },
+                        { name: 'Multi Source', share: hasLiveRows ? sourcingData.multiPercent : (100 - (restoredStats?.singleSourcingPct ?? 100)) }
                     ] : [
                         { name: 'Start Setup to map Item Column', share: 0 }
                     ],
@@ -999,8 +999,8 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                     type: 'percent',
                     color: 'emerald',
                     subMetrics: [
-                        { label: 'Contracted', value: stats.contractedSpend, type: 'currency' },
-                        { label: 'Unverified', value: totalSpend - stats.contractedSpend, type: 'currency' }
+                        { label: 'Contracted', value: hasLiveRows ? stats.contractedSpend : ((restoredStats?.contractedPercent ?? contractedPercent) / 100) * totalSpend, type: 'currency' },
+                        { label: 'Unverified', value: totalSpend - (hasLiveRows ? stats.contractedSpend : ((restoredStats?.contractedPercent ?? contractedPercent) / 100) * totalSpend), type: 'currency' }
                     ],
                     data: filteredRows.filter(r => r['Contract_Status'] === 'Unverified')
                 },
@@ -1008,11 +1008,11 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                     id: 'pt-risk',
                     icon: AlertCircle,
                     label: 'Payment Terms Risk',
-                    value: stats.ptRiskSpend,
+                    value: hasLiveRows ? stats.ptRiskSpend : ((restoredStats?.ptRiskPercent ?? 0) / 100) * totalSpend,
                     type: 'currency',
                     color: 'rose',
                     subMetrics: [
-                        { label: 'Risk Exposure', value: (stats.ptRiskSpend / (totalSpend || 1)) * 100, type: 'percent' }
+                        { label: 'Risk Exposure', value: hasLiveRows ? (stats.ptRiskSpend / (totalSpend || 1)) * 100 : (restoredStats?.ptRiskPercent ?? 0), type: 'percent' }
                     ],
                     data: filteredRows.filter(r => /immediate|cash|net 7|net0|pickup/i.test(String(r[mappings['payment_terms']] || '').toLowerCase()))
                 },
@@ -1037,7 +1037,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                     topDistribution: poSummary.slice(0, 5)
                 },
                 {
-                    id: 'tail-spend', icon: AlertCircle, label: 'Tail Spend Analysis', value: tailSpendPercentage, type: 'percent', color: 'rose',
+                    id: 'tail-spend', icon: AlertCircle, label: 'Tail Spend Analysis', value: hasLiveRows ? tailSpendPercentage : (restoredStats?.tailSpendPct ?? 0), type: 'percent', color: 'rose',
                     subMetrics: [
                         { label: 'Tail Suppliers', value: tailSuppliersPercentage, type: 'percent' },
                         { label: 'Tail Transactions', value: tailTxnsPercentage, type: 'percent' }
@@ -1638,8 +1638,8 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                 ))}
                             </div>
 
-                            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                                <div className="lg:col-span-2 bg-zinc-900/40 border border-zinc-900 rounded-[2.5rem] p-8 flex flex-col border-b-4 border-b-primary/20">
+                            <div className="grid grid-cols-1 gap-8">
+                                <div className="bg-zinc-900/40 border border-zinc-900 rounded-[2.5rem] p-8 flex flex-col border-b-4 border-b-primary/20">
                                     <div className="flex justify-between items-center mb-10">
                                         <div>
                                             <h3 className="text-2xl font-bold tracking-tight">Spend Trend</h3>

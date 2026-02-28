@@ -87,7 +87,7 @@ const SkeletonRow = () => (
 // ─── Component ────────────────────────────────────────────────────────────────
 
 interface ActivityHistoryProps {
-    projectId: string;
+    projectId?: string; // optional — omit for global activity feed across all projects
 }
 
 const ActivityHistory: React.FC<ActivityHistoryProps> = ({ projectId }) => {
@@ -98,24 +98,21 @@ const ActivityHistory: React.FC<ActivityHistoryProps> = ({ projectId }) => {
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
-        if (!effectiveUid || !projectId) {
+        if (!effectiveUid) {
             setLoading(false);
             return;
         }
 
-        const uploadsQuery = query(
-            collection(db, 'uploads'),
-            where('userId', '==', effectiveUid),
-            where('projectId', '==', projectId)
-        );
+        // If no projectId is passed, we fetch ALL activity for this user
+        let uploadsQ = query(collection(db, 'uploads'), where('userId', '==', effectiveUid));
+        let exportsQ = query(collection(db, 'exports'), where('userId', '==', effectiveUid));
 
-        const exportsQuery = query(
-            collection(db, 'exports'),
-            where('userId', '==', effectiveUid),
-            where('projectId', '==', projectId)
-        );
+        if (projectId) {
+            uploadsQ = query(uploadsQ, where('projectId', '==', projectId));
+            exportsQ = query(exportsQ, where('projectId', '==', projectId));
+        }
 
-        const unsubUploads = onSnapshot(uploadsQuery, (snap) => {
+        const unsubUploads = onSnapshot(uploadsQ, (snap) => {
             const raw = snap.docs.map(doc => {
                 const d = doc.data();
                 return {
@@ -135,8 +132,8 @@ const ActivityHistory: React.FC<ActivityHistoryProps> = ({ projectId }) => {
             setLoading(false);
         });
 
-        const unsubExports = onSnapshot(exportsQuery, (snap) => {
-            const raw = snap.docs.map(doc => ({
+        const unsubExports = onSnapshot(exportsQ, (snap: any) => {
+            const raw = snap.docs.map((doc: any) => ({
                 id: doc.id,
                 type: 'export',
                 fileName: doc.data().fileName,

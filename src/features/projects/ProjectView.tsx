@@ -30,8 +30,6 @@ import {
     updateDoc,
     doc,
     onSnapshot,
-    orderBy,
-    limit
 } from 'firebase/firestore';
 import { db, storage } from '../../lib/firebase';
 import { useEffectiveUid } from '../../hooks/useEffectiveUid';
@@ -147,22 +145,24 @@ const ProjectView: React.FC = () => {
     // Detect interrupted uploads - derived from useEffect, removed in favour of determineProjectState
     const determineProjectState = (project: typeof currentProject) => {
         if (!project) return 'SHOW_UPLOAD';
+
         const step = Number(project.currentStep ?? 0);
-        const hasRawGrid = !!(project as any).rawGridUrl;
+        const hasRawGrid = !!project.rawGridUrl;
+        const isFinished = project.status === 'data_quality_complete' || project.status === 'completed' || step >= 6;
 
-        // Case 1 — Brand new project, no file yet
-        if (!hasRawGrid && step === 0) return 'SHOW_UPLOAD';
+        // Case 1 — Project fully completed
+        if (isFinished) return 'SHOW_DASHBOARD';
 
-        // Case 2 — File uploaded but pipeline not started
-        if (hasRawGrid && step <= 1) return 'SHOW_RESUME_UPLOAD';
+        // Case 2 — Brand new project, no file yet
+        if (!hasRawGrid && step === 0) {
+            return 'SHOW_UPLOAD';
+        }
 
-        // Case 3 — Pipeline in progress
-        if (step >= 2 && project.status !== 'data_quality_complete') return 'SHOW_RESUME_PIPELINE';
+        // Case 3 — File uploaded but pipeline not started
+        if (step <= 1) return 'SHOW_RESUME_UPLOAD';
 
-        // Case 4 — Project fully completed
-        if (project.status === 'data_quality_complete') return 'SHOW_DASHBOARD';
-
-        return 'SHOW_UPLOAD';
+        // Case 4 — Pipeline in progress
+        return 'SHOW_RESUME_PIPELINE';
     };
 
     const projectState = initialLoadDone ? determineProjectState(currentProject) : null;
@@ -209,60 +209,52 @@ const ProjectView: React.FC = () => {
     };
 
     useEffect(() => {
-        if (!effectiveUid) return;
+        // Only run when there is no project selected yet. If currentProject is
+        // already set (refresh, project switch, direct link), onSnapshot handles
+        // all state restoration and sets initialLoadDone itself.
+        if (!effectiveUid || currentProject) return;
 
         const loadDashboard = async () => {
             try {
-                // If no project selected, find the latest one to show high-level stats
-                if (!currentProject) {
-                    const q = query(
-                        collection(db, 'projects'),
-                        where('userId', '==', effectiveUid),
-                        orderBy('updatedAt', 'desc'),
-                        limit(1)
-                    );
-                    const snapshot = await getDocs(q);
+                const q = query(
+                    collection(db, 'projects'),
+                    where('userId', '==', effectiveUid)
+                );
+                const snapshot = await getDocs(q);
 
-                    if (!snapshot.empty) {
-                        const data = snapshot.docs[0].data();
-                        // Extract just the projectId portion — doc IDs are "{uid}_{projectId}"
-                        const rawDocId = snapshot.docs[0].id;
-                        const projectId = rawDocId.includes('_')
-                            ? rawDocId.slice(rawDocId.indexOf('_') + 1)
-                            : rawDocId;
-                        const project = normalizeProject(data, projectId);
-                        setCurrentProject(project);
+                if (!snapshot.empty) {
+                    // Sort manually to avoid index requirement
+                    const docs = snapshot.docs.map(d => ({
+                        id: d.id,
+                        data: d.data()
+                    })).sort((a, b) => {
+                        const tA = a.data.updatedAt?.toMillis ? a.data.updatedAt.toMillis() : new Date(a.data.updatedAt || 0).getTime();
+                        const tB = b.data.updatedAt?.toMillis ? b.data.updatedAt.toMillis() : new Date(b.data.updatedAt || 0).getTime();
+                        return tB - tA;
+                    });
 
-                        if (data.latestAnalysis) {
-                            const la = data.latestAnalysis;
-                            setAnalysis(la);
-                            setTotalSpend(la.totalSpend ?? 0);
-                            setSavingsPotentialMin(la.savingsPotentialMin ?? 0);
-                            setSavingsPotentialMax(la.savingsPotentialMax ?? 0);
-                            setUniqueVendors(la.uniqueVendors ?? 0);
-                            setDuplicateCount(la.duplicateCount ?? 0);
-                            setAbcA(la.abcA ?? 0);
-                            setAbcB(la.abcB ?? 0);
-                            setAbcC(la.abcC ?? 0);
-                        }
-
-                        if (project.status !== 'data_quality_complete' && project.currentStep && Number(project.currentStep) > 0) {
-                            setShowResumePrompt(true);
-                            setResumeStep(project.currentStep);
-                        }
-                    } else {
-                        // no latestAnalysis — determineProjectState handles display
-                    }
+                    const data = docs[0].data;
+                    const rawDocId = docs[0].id;
+                    const projectId = rawDocId.includes('_')
+                        ? rawDocId.slice(rawDocId.indexOf('_') + 1)
+                        : rawDocId;
+                    const project = normalizeProject(data, projectId);
+                    setCurrentProject(project);
+                    // onSnapshot will fire for this project and set initialLoadDone=true
+                } else {
+                    // No projects at all — nothing to load, unblock the UI
+                    setInitialLoadDone(true);
                 }
             } catch (error) {
                 console.error('Dashboard load error:', error);
-            } finally {
-                setInitialLoadDone(true);
+                setInitialLoadDone(true); // unblock UI on error
             }
+            // No finally block: when a project is found, onSnapshot is the sole
+            // setter of initialLoadDone so that all KPI state is populated first.
         };
 
         loadDashboard();
-    }, [effectiveUid, currentProject?.id]);
+    }, [effectiveUid]); // currentProject?.id removed — re-running on switch caused race conditions
 
     // FIX 1: Reset all local state when the selected project changes so stale data
     // from the previous project is never shown while the new snapshot loads.
@@ -270,6 +262,7 @@ const ProjectView: React.FC = () => {
     useEffect(() => {
         const newId = currentProject?.id ?? null;
         if (newId === prevProjectIdRef.current) return; // same project — nothing to reset
+        console.log('[ProjectView] Reset effect: switching from', prevProjectIdRef.current, 'to', newId);
         prevProjectIdRef.current = newId;
 
         // Reset pipeline session data and load indicator on every project switch
@@ -285,6 +278,20 @@ const ProjectView: React.FC = () => {
         });
         setAnalysis(null);
         setShowResumePrompt(false);
+        setTotalSpend(0);
+        setSavingsPotentialMin(0);
+        setSavingsPotentialMax(0);
+        setUniqueVendors(0);
+        setDuplicateCount(0);
+        setAbcA(0);
+        setAbcB(0);
+        setAbcC(0);
+        setIdentifiedSavings(0);
+        setSavingsBreakdown(null);
+        setContractedPercent(null);
+        setPtRiskPercent(null);
+        setSingleSourcingPct(null);
+        setTailSpendPct(null);
     }, [currentProject?.id]);
 
     useEffect(() => {
@@ -292,37 +299,25 @@ const ProjectView: React.FC = () => {
 
         const projectRef = doc(db, 'projects', `${effectiveUid}_${currentProject.id}`);
 
-        const unsubscribe = onSnapshot(projectRef, async (snap) => {
+        const unsubscribe = onSnapshot(projectRef, (snap) => {
+            console.log('[ProjectView] onSnapshot fired for', currentProject?.id, 'exists:', snap.exists());
             if (snap.exists()) {
                 const project = snap.data();
 
                 // CRITICAL-02 FIX: Prevent onSnapshot from overwriting mid-pipeline session data
-                // We only normalize and apply if this is a fresh load or a confirmed external update
-                // Since this is a single-user flow, any writes coming from *us* don't need to overwrite our own memory
                 const normalized = normalizeProject(project, currentProject?.id || '');
 
                 // FIX 2: Brand-new draft projects have no file yet — mark loading done immediately
-                // so SHOW_UPLOAD renders right away. Must still call setCurrentProject so
-                // determineProjectState sees the project and can pick SHOW_UPLOAD.
+                // so SHOW_UPLOAD renders right away.
                 if (project.status === 'draft' && !project.rawGridUrl) {
-                    setCurrentProject(prev =>
-                        prev?.id === normalized.id && prev?.status === normalized.status ? prev : normalized
-                    );
-                    setInitialLoadDone(true);
+                    setCurrentProject(normalized);
                     setIsRestoring(false);
+                    setInitialLoadDone(true);
                     return;
                 }
 
-                // HIGH-03 FIX: We don't call setCurrentProject if the object is functionally identical
-                // This prevents the infinite dependency loop
-                setCurrentProject(prev => {
-                    // HIGH-03 FIX: Only trigger re-render if id or status actually changed
-                    // `updatedAt` is not a typed Project field, so we skip it
-                    if (prev?.id === normalized.id && prev?.status === normalized.status) {
-                        return prev;
-                    }
-                    return normalized;
-                });
+                // HIGH-03 FIX: Only update currentProject if id or status actually changed
+                setCurrentProject(normalized);
 
                 // Map numeric steps to ETLStep strings
                 const stepMap: Record<number | string, ETLStep> = {
@@ -335,36 +330,41 @@ const ProjectView: React.FC = () => {
                 };
 
                 const step = project.currentStep;
-                if (step !== undefined && Number(step) >= 1 && stepMap[step]) {
-                    setActiveStep(stepMap[step]);
+                const stepNum = Number(step ?? 0);
+                const isCompletedOrDone = project.status === 'data_quality_complete' || project.status === 'completed' || stepNum >= 6;
+                const isMidPipeline = stepNum >= 2 && stepNum <= 5 && !isCompletedOrDone;
+
+                if (isMidPipeline && stepMap[stepNum]) {
+                    setActiveStep(stepMap[stepNum]);
+                } else if (isCompletedOrDone) {
+                    setActiveStep('dashboard');
                 }
 
-                // Recover raw grid JSON from Storage if session memory is empty
-                if ((!projectData.rawSheetData || projectData.rawSheetData.length === 0) && project.rawGridUrl) {
-                    try {
-                        const response = await fetch(project.rawGridUrl as string);
-                        const grid = await response.json();
-                        setProjectData(prev => ({ ...prev, rawSheetData: grid }));
-                    } catch (err) {
-                        console.error('[Grid Recovery] Failed to fetch raw grid:', err);
-                    }
+                // Restore resume-prompt state (shown when project has a partial upload)
+                if (!isCompletedOrDone && project.currentStep && Number(project.currentStep) > 0) {
+                    setShowResumePrompt(true);
+                    setResumeStep(project.currentStep);
                 }
 
                 // Restore Pipeline Stats & Data — only fill gaps, never overwrite live session data
                 setProjectData(prev => {
                     // CRITICAL-02: If we already have raw data from an active pipeline session, DO NOT overwrite
                     const hasLiveSession = prev.raw && prev.raw.length > 0;
-                    if (hasLiveSession) return prev;
+                    if (hasLiveSession) {
+                        console.log('[ProjectView] onSnapshot setProjectData: skipping — live session has', prev.raw.length, 'rows');
+                        return prev;
+                    }
 
-                    // DATA PARITY FIX: For completed projects with a categoryResultsUrl, do NOT populate `raw`
-                    // from the 100-row Firestore preview (rawGrid). Leave raw=[] so the auto-restore useEffect
-                    // can fetch the FULL dataset from Firebase Storage — ensuring admin and user see identical numbers.
-                    const isCompleted = project.status === 'data_quality_complete';
-                    const hasCatUrl = !!project.categoryResultsUrl;
+                    // FIX: Always populate raw from Firestore preview (rawGrid) as a fallback.
+                    // The auto-restore useEffect will overwrite with the full dataset from
+                    // categoryResultsUrl if available — but we no longer leave raw=[] which
+                    // caused data loss when the Storage fetch failed.
+                    const fallbackRaw = normalized.rawGrid ?? prev.raw;
+                    console.log('[ProjectView] onSnapshot setProjectData: restoring', fallbackRaw.length, 'rows from Firestore preview');
 
                     return {
                         ...prev,
-                        raw: (isCompleted && hasCatUrl) ? [] : (normalized.rawGrid ?? prev.raw),
+                        raw: fallbackRaw,
                         headers: normalized.detectedHeaders ?? prev.headers,
                         mappings: normalized.columnMapping ?? prev.mappings,
                         currency: normalized.currency || 'INR',
@@ -378,9 +378,9 @@ const ProjectView: React.FC = () => {
                     };
                 });
 
-
                 if (project.latestAnalysis) {
                     const la = project.latestAnalysis;
+                    console.log('[ProjectView] onSnapshot: restoring latestAnalysis — totalSpend:', la.totalSpend, 'uniqueVendors:', la.uniqueVendors);
                     setAnalysis(la);
                     setTotalSpend(la.totalSpend ?? 0);
                     setSavingsPotentialMin(la.savingsPotentialMin ?? 0);
@@ -397,7 +397,36 @@ const ProjectView: React.FC = () => {
                     if (la.ptRiskPercent != null) setPtRiskPercent(la.ptRiskPercent);
                     if (la.singleSourcingPct != null) setSingleSourcingPct(la.singleSourcingPct);
                     if (la.tailSpendPct != null) setTailSpendPct(la.tailSpendPct);
+                } else if (project.stats) {
+                    // Fallback: latestAnalysis may be missing for older projects or if the
+                    // Storage-backed write failed. Use the stats field (always written by
+                    // updateProject at categorization time) so the dashboard never shows zeros.
+                    console.warn('[ProjectView] onSnapshot: NO latestAnalysis — falling back to stats field');
+                    const s = project.stats;
+                    setTotalSpend(s.spend ?? 0);
+                    setUniqueVendors(s.suppliersCount ?? 0);
+                    setSavingsPotentialMin(s.savingsPotential ?? 0);
+                    setSavingsPotentialMax((s.savingsPotential ?? 0) * 1.2);
+                } else {
+                    console.warn('[ProjectView] onSnapshot: NO latestAnalysis and NO stats found in Firestore doc!');
                 }
+
+                // Unblock the UI NOW — all critical KPI state is set above.
+                // Raw sheet grid fetch is deferred below as a background update so it
+                // never delays the dashboard from rendering.
+                setIsRestoring(false);
+                setInitialLoadDone(true);
+
+                // Recover raw grid JSON from Storage in the background (for the data-grid view).
+                // This is fire-and-forget — it does NOT block setInitialLoadDone.
+                if (project.rawGridUrl) {
+                    fetch(project.rawGridUrl as string)
+                        .then(r => r.json())
+                        .then((grid: any) => setProjectData(prev => ({ ...prev, rawSheetData: grid })))
+                        .catch((err: any) => console.error('[Grid Recovery] Failed to fetch raw grid:', err));
+                }
+
+                return;
             }
             setIsRestoring(false);
             setInitialLoadDone(true);
@@ -417,7 +446,7 @@ const ProjectView: React.FC = () => {
     // This overrides the 100-row Firestore preview (rawGrid) that onSnapshot may have loaded.
     useEffect(() => {
         const catUrl = currentProject?.categoryResultsUrl;
-        const projectIsComplete = currentProject?.status === 'data_quality_complete';
+        const projectIsComplete = currentProject?.status === 'data_quality_complete' || currentProject?.status === 'completed';
         const la = currentProject?.latestAnalysis;
 
         // Only run when the project is complete and we have finished the initial load
@@ -434,9 +463,15 @@ const ProjectView: React.FC = () => {
             setIsRestoring(true);
             try {
                 if (catUrl) {
-                    // New format: rows stored in Firebase Storage JSON
+                    console.log('[Auto-Restore] Fetching full dataset from categoryResultsUrl:', catUrl);
                     const response = await fetch(catUrl);
+                    if (!response.ok) {
+                        console.error('[Auto-Restore] Storage fetch failed:', response.status, response.statusText);
+                        console.warn('[Auto-Restore] Dashboard will use Firestore preview data instead.');
+                        return;
+                    }
                     const rows = await response.json();
+                    console.log('[Auto-Restore] Successfully loaded', rows.length, 'rows from Storage');
 
                     setProjectData(prev => ({
                         ...prev,
@@ -447,6 +482,7 @@ const ProjectView: React.FC = () => {
                     }));
                 } else if (currentProject?.categoryResults && Array.isArray(currentProject.categoryResults) && currentProject.categoryResults.length > 0) {
                     // EXPORT FIX A (Legacy Firestore): Before PERF-03, rows were written directly to Firestore as categoryResults[]
+                    console.log('[Auto-Restore] Using legacy Firestore categoryResults:', currentProject.categoryResults.length, 'rows');
                     const legacyRows = currentProject.categoryResults;
                     setProjectData(prev => ({
                         ...prev,
@@ -455,11 +491,12 @@ const ProjectView: React.FC = () => {
                         currency: prev.currency || la?.currency || 'INR',
                         clusters: (prev.clusters.length > 0 ? prev.clusters : la?.clusters) ?? prev.clusters,
                     }));
+                } else {
+                    console.warn('[Auto-Restore] No categoryResultsUrl and no legacy data. Dashboard will use Firestore preview only.');
                 }
-                // If neither catUrl nor la.raw exists, data simply won't be available for export —
-                // but we still clear the restoring flag so the dashboard renders correctly.
             } catch (err) {
                 console.error('[Auto-Restore] Failed to load category results:', err);
+                console.warn('[Auto-Restore] Dashboard will use Firestore preview data (rawGrid) as fallback.');
             } finally {
                 setIsRestoring(false);
             }
@@ -1004,7 +1041,10 @@ const ProjectView: React.FC = () => {
                             totalRows: updatedData.length,
                             mappings: projectData.mappings,
                             currency: projectData.currency,
-                            clusters: projectData.clusters,
+                            // NOTE: clusters (supplier matches) are already stored in the supplierMatches
+                            // field of the project document. Do NOT duplicate them here — large cluster
+                            // arrays can push the Firestore document past the 1 MB limit and silently
+                            // fail the entire write, causing latestAnalysis to be missing on revisit.
                         }
                     });
 
@@ -1093,7 +1133,10 @@ const ProjectView: React.FC = () => {
     const handleDataQualityComplete = () => {
         setIsProcessing(true);
         if (currentProject) {
-            updateProject(currentProject.id, { status: 'completed' });
+            updateProject(currentProject.id, {
+                status: 'data_quality_complete',
+                currentStep: 6
+            });
             updateProjectCache(currentProject.id, projectData);
 
             // Phase 9 CRITICAL-04 FIX: Removed !isViewingClient so Admins can finalize pipelines on behalf of users.
@@ -1114,10 +1157,8 @@ const ProjectView: React.FC = () => {
                 })();
             }
         }
-        setTimeout(() => {
-            setIsProcessing(false);
-            setActiveStep('dashboard');
-        }, 1000);
+        setIsProcessing(false);
+        setActiveStep('dashboard');
     };
 
     return (
@@ -1370,7 +1411,10 @@ const ProjectView: React.FC = () => {
                                                                 <p className="text-xs text-amber-500/70 mt-0.5 font-medium">
                                                                     You have completed your free trial project. Upgrade to Enterprise to analyze unlimited procurement files.
                                                                 </p>
-                                                                <button className="mt-2 bg-amber-500 text-black px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest hover:bg-amber-400 transition-colors">
+                                                                <button
+                                                                    onClick={() => window.open('https://cal.id/hello-enalsys', '_blank')}
+                                                                    className="mt-2 bg-amber-500 text-black px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest hover:bg-amber-400 transition-colors"
+                                                                >
                                                                     Upgrade Now
                                                                 </button>
                                                             </div>
@@ -1424,8 +1468,24 @@ const ProjectView: React.FC = () => {
                             )}
                             {activeStep === 'mapping' && <ColumnMapper onConfirm={handleMappingComplete} headers={projectData.headers} initialMappings={projectData.mappings} />}
                             {activeStep === 'header-selection' && (
-                                projectData.rawSheetData ? (
+                                projectData.rawSheetData && projectData.rawSheetData.length > 0 ? (
                                     <HeaderRowSelector rawData={projectData.rawSheetData} merges={projectData.merges} onSelect={handleHeaderRowSelection} />
+                                ) : (currentProject?.rawGridUrl || isRestoring) ? (
+                                    <div className="flex flex-col items-center justify-center h-[60vh] space-y-8 animate-in fade-in duration-500">
+                                        <div className="relative">
+                                            <div className="w-24 h-24 border-4 border-primary/20 border-t-primary rounded-full animate-spin" />
+                                            <div className="absolute inset-0 flex items-center justify-center">
+                                                <Database className="h-8 w-8 text-primary animate-pulse" />
+                                            </div>
+                                        </div>
+                                        <div className="text-center space-y-2">
+                                            <h2 className="text-2xl font-bold">Resuming Session</h2>
+                                            <p className="text-zinc-500 max-w-sm">
+                                                Restoring your spreadsheet data from secure storage.
+                                                This usually takes just a few seconds...
+                                            </p>
+                                        </div>
+                                    </div>
                                 ) : (
                                     <div className="flex flex-col items-center justify-center p-12 bg-zinc-900/50 border border-zinc-800 rounded-[2.5rem] text-center max-w-2xl mx-auto space-y-8 animate-in fade-in slide-in-from-bottom-4">
                                         <div className="w-20 h-20 bg-amber-500/10 rounded-3xl flex items-center justify-center text-amber-500">

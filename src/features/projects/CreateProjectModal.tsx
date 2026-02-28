@@ -13,7 +13,7 @@ interface CreateProjectModalProps {
 
 import { useSubscription } from '../subscription/SubscriptionContext';
 import { Lock } from 'lucide-react';
-import { ENALSYS_EMAIL } from '../../lib/constants';
+
 
 const CreateProjectModal: React.FC<CreateProjectModalProps> = ({ isOpen, onClose, onCreate, canCreate }) => {
     const [name, setName] = useState('');
@@ -60,7 +60,7 @@ const CreateProjectModal: React.FC<CreateProjectModalProps> = ({ isOpen, onClose
                         <button onClick={onClose} className="px-6 py-2.5 rounded-xl font-bold text-zinc-400 hover:text-white transition-colors">
                             Cancel
                         </button>
-                        <button onClick={() => alert(`Please contact sales at ${ENALSYS_EMAIL} to upgrade.`)} className="px-8 py-2.5 bg-amber-600 hover:bg-amber-500 text-white rounded-xl font-bold transition-all shadow-lg shadow-amber-500/20">
+                        <button onClick={() => window.open('https://cal.id/hello-enalsys', '_blank')} className="px-8 py-2.5 bg-amber-600 hover:bg-amber-500 text-white rounded-xl font-bold transition-all shadow-lg shadow-amber-500/20">
                             Contact to Upgrade
                         </button>
                     </div>

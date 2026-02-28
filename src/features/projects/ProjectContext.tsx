@@ -200,8 +200,11 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
         // SAFEGUARD: Enforce trial limit — only Admin and Enterprise can bypass.
         // This implicitly captures 'trial', 'none', and any other new role types.
         if (effectiveRole !== 'admin' && effectiveRole !== 'enterprise') {
-            // First check local state for immediate feedback
-            if (projects.length >= 1) {
+            // First check local state for immediate feedback — exclude empty step-0 drafts
+            const meaningfulLocal = projects.filter(
+                p => (Number(p.currentStep) > 0) || !!p.rawGridUrl
+            );
+            if (meaningfulLocal.length >= 1) {
                 console.error('[ProjectContext] Trial limit reached (local).');
                 return;
             }
@@ -296,15 +299,19 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
     };
 
     const checkTrialLimit = async (uid: string): Promise<boolean> => {
-        // Count ALL projects (drafts, in-progress, completed)
+        // Count only meaningful projects — ones where a file was actually uploaded.
+        // Empty step-0 drafts (no file, no pipeline progress) are excluded so they
+        // don't block a trial user from ever creating their first real project.
         const allQuery = query(
             collection(db, 'projects'),
             where('userId', '==', uid)
         );
         const allSnap = await getDocs(allQuery);
-
-        // Trial users can have exactly 1 project in existence
-        return allSnap.size >= 1;
+        const meaningful = allSnap.docs.filter(d => {
+            const data = d.data();
+            return (data.currentStep != null && Number(data.currentStep) > 0) || !!data.rawGridUrl;
+        });
+        return meaningful.length >= 1;
     };
 
     const addActivity = async (projectId: string, activity: Omit<Project['activities'][0], 'id' | 'timestamp'>) => {

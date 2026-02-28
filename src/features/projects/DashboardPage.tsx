@@ -148,7 +148,7 @@ const DashboardPage = () => {
                         const projectId = rawId.includes('_') ? rawId.slice(rawId.indexOf('_') + 1) : rawId;
                         return normalizeProject(d.data(), projectId);
                     })
-                    .filter(p => !p.currentStep || (typeof p.currentStep === 'number' && p.currentStep >= 1) || (typeof p.currentStep === 'string' && p.currentStep !== 'upload'))
+                    .filter(p => p.currentStep == null || (typeof p.currentStep === 'number' && p.currentStep >= 1) || (typeof p.currentStep === 'string' && p.currentStep !== 'upload'))
                     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
                 // Take top 10
@@ -359,7 +359,7 @@ const DashboardPage = () => {
                                         <p className="text-zinc-400">Here's an overview of your procurement data projects.</p>
                                     </div>
                                     <button
-                                        onClick={() => isLimitReached ? window.open('https://enalsys.com/contact', '_blank') : setIsModalOpen(true)}
+                                        onClick={() => isLimitReached ? window.open('https://cal.id/hello-enalsys', '_blank') : setIsModalOpen(true)}
                                         disabled={isCreating}
                                         className={cn(
                                             "group px-6 py-2.5 rounded-xl font-bold flex items-center gap-2 transition-all shadow-lg",
@@ -464,8 +464,7 @@ const DashboardPage = () => {
                                                                 }`}>
                                                                 {project.status || 'Active'}
                                                             </div>
-                                                            {(isAdmin || effectiveRole !== 'trial') && (
-                                                                <button
+                                                            <button
                                                                     onClick={(e) => {
                                                                         e.stopPropagation();
                                                                         deleteProject(project.id);
@@ -474,7 +473,6 @@ const DashboardPage = () => {
                                                                 >
                                                                     <Trash2 className="h-4 w-4" />
                                                                 </button>
-                                                            )}
                                                         </div>
                                                     </div>
 
