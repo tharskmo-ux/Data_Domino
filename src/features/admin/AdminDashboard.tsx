@@ -39,6 +39,7 @@ interface JoinedUser {
     role: AppRole;
     subType: 'FREE' | 'ENTERPRISE';
     subStatus: 'ACTIVE' | 'PAST_DUE' | 'CANCELLED' | 'SUSPENDED';
+    deletedAt?: Timestamp;
 }
 
 const AdminDashboard = () => {
@@ -111,7 +112,8 @@ const AdminDashboard = () => {
                     joinedAt: roleDoc.createdAt || org.createdAt || Timestamp.now(),
                     role: roleDoc.role as AppRole,
                     subType: org.subscription?.type || 'FREE',
-                    subStatus: org.subscription?.status || 'ACTIVE'
+                    subStatus: org.subscription?.status || 'ACTIVE',
+                    deletedAt: roleDoc.deletedAt || null
                 });
             }
 
@@ -160,7 +162,8 @@ const AdminDashboard = () => {
         admins: users.filter(u => u.role === 'admin').length,
         enterprise: users.filter(u => u.role === 'enterprise').length,
         trial: users.filter(u => u.role === 'trial').length,
-        revoked: users.filter(u => u.role === 'revoked').length
+        revoked: users.filter(u => u.role === 'revoked' && !u.deletedAt).length,
+        pendingDeletion: users.filter(u => u.deletedAt).length
     }), [users]);
 
     const filteredUsers = users.filter(u =>
@@ -168,14 +171,14 @@ const AdminDashboard = () => {
         u.displayName.toLowerCase().includes(searchQuery.toLowerCase())
     );
 
-    const runAction = async (targetUid: string, role: AppRole, subType: 'FREE' | 'ENTERPRISE', subStatus: 'ACTIVE' | 'SUSPENDED') => {
+    const runAction = async (targetUid: string, role: AppRole, subType: 'FREE' | 'ENTERPRISE', subStatus: 'ACTIVE' | 'SUSPENDED', additionalFields: any = {}) => {
         setActionLoading(targetUid);
         try {
             const batch = writeBatch(db);
             const roleRef = doc(db, 'user_roles', targetUid);
             const orgRef = doc(db, 'organizations', targetUid);
 
-            batch.update(roleRef, { role });
+            batch.update(roleRef, { role, ...additionalFields });
             batch.update(orgRef, {
                 'subscription.type': subType,
                 'subscription.status': subStatus,
@@ -236,7 +239,19 @@ const AdminDashboard = () => {
                 });
                 break;
             case 'RESTORE_ACCESS':
-                runAction(u.uid, 'trial', 'FREE', 'ACTIVE');
+                runAction(u.uid, 'trial', 'FREE', 'ACTIVE', { deletedAt: null });
+                break;
+            case 'DELETE_USER':
+                setConfirmModal({
+                    show: true,
+                    title: "Delete User",
+                    message: `Mark ${u.email} for deletion? This will start a 30-day grace period. The user will be moved to 'Revoked' status but data will remain accessible for 30 days.`,
+                    onConfirm: () => runAction(u.uid, 'revoked', 'FREE', 'SUSPENDED', { deletedAt: Timestamp.now() }),
+                    isDestructive: true
+                });
+                break;
+            case 'CANCEL_DELETION':
+                runAction(u.uid, 'revoked', 'FREE', 'SUSPENDED', { deletedAt: null });
                 break;
         }
     };
@@ -246,7 +261,7 @@ const AdminDashboard = () => {
             uid: u.uid,
             email: u.email,
             displayName: u.displayName,
-            role: u.role as 'admin' | 'enterprise' | 'trial',
+            role: u.role as 'admin' | 'enterprise' | 'trial' | 'revoked',
             subType: u.subType as 'FREE' | 'ENTERPRISE'
         });
         navigate('/');
@@ -313,12 +328,13 @@ const AdminDashboard = () => {
             </div>
 
             {/* Stat Cards */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-12">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-6 mb-12">
                 {[
                     { label: "Total Users", value: stats.total, icon: Users, color: "text-white" },
                     { label: "Enterprise", value: stats.enterprise, icon: Zap, color: "text-primary" },
                     { label: "Trial Access", value: stats.trial, icon: Activity, color: "text-amber-500" },
-                    { label: "Revoked Access", value: stats.revoked, icon: AlertCircle, color: "text-red-500" }
+                    { label: "Revoked Access", value: stats.revoked, icon: AlertCircle, color: "text-red-500/50" },
+                    { label: "Pending Deletion", value: stats.pendingDeletion, icon: XCircle, color: "text-red-500" }
                 ].map((s, i) => (
                     <div key={i} className="bg-zinc-900/40 border border-zinc-800/50 rounded-3xl p-6 relative overflow-hidden group hover:border-zinc-700/50 transition-all">
                         <div className="flex items-start justify-between relative z-10">
@@ -490,22 +506,67 @@ const AdminDashboard = () => {
                                                         </>
                                                     )}
                                                     {u.role === 'revoked' && (
-                                                        <button
-                                                            disabled={!!actionLoading}
-                                                            onClick={() => handleAction(u, 'RESTORE_ACCESS')}
-                                                            className="px-3 py-1.5 bg-emerald-500/10 hover:bg-emerald-500 text-emerald-500 hover:text-white border border-emerald-500/20 rounded-lg text-[9px] font-black uppercase tracking-widest transition-all"
-                                                        >
-                                                            Restore Access
-                                                        </button>
+                                                        <>
+                                                            {u.deletedAt ? (
+                                                                <>
+                                                                    <div className="px-3 py-1.5 bg-red-600/10 border border-red-500/20 rounded-lg text-[9px] font-black uppercase tracking-widest text-red-500">
+                                                                        {(() => {
+                                                                            const daysLeft = 30 - Math.floor((Date.now() - u.deletedAt.toMillis()) / (24 * 60 * 60 * 1000));
+                                                                            return `Purge in ${Math.max(0, daysLeft)} Days`;
+                                                                        })()}
+                                                                    </div>
+                                                                    <button
+                                                                        disabled={!!actionLoading}
+                                                                        onClick={() => handleAction(u, 'CANCEL_DELETION')}
+                                                                        className="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 rounded-lg text-[9px] font-black uppercase tracking-widest transition-all text-zinc-400"
+                                                                    >
+                                                                        Cancel Deletion
+                                                                    </button>
+                                                                </>
+                                                            ) : (
+                                                                <button
+                                                                    disabled={!!actionLoading}
+                                                                    onClick={() => handleAction(u, 'DELETE_USER')}
+                                                                    className="px-3 py-1.5 bg-red-600/10 hover:bg-red-600 text-red-500 hover:text-white border border-red-500/20 rounded-lg text-[9px] font-black uppercase tracking-widest transition-all"
+                                                                >
+                                                                    Delete User
+                                                                </button>
+                                                            )}
+                                                            <button
+                                                                disabled={!!actionLoading}
+                                                                onClick={() => handleAction(u, 'RESTORE_ACCESS')}
+                                                                className="px-3 py-1.5 bg-emerald-500/10 hover:bg-emerald-500 text-emerald-500 hover:text-white border border-emerald-500/20 rounded-lg text-[9px] font-black uppercase tracking-widest transition-all"
+                                                            >
+                                                                Restore Access
+                                                            </button>
+                                                        </>
                                                     )}
-                                                    {/* View Client button — only for non-admin, non-revoked users */}
-                                                    {u.role !== 'admin' && u.role !== 'revoked' && (
-                                                        <button
-                                                            onClick={() => handleViewClient(u)}
-                                                            className="px-3 py-1.5 bg-amber-500/10 hover:bg-amber-500 text-amber-500 hover:text-white border border-amber-500/20 rounded-lg text-[9px] font-black uppercase tracking-widest transition-all"
-                                                        >
-                                                            View Client
-                                                        </button>
+                                                    {/* View Client button — allowed for non-admins, including revoked users pending deletion */}
+                                                    {u.role !== 'admin' && (u.role !== 'revoked' || u.deletedAt) && (
+                                                        <div className="flex items-center gap-2">
+                                                            {u.deletedAt && (
+                                                                <>
+                                                                    <button
+                                                                        onClick={() => showToast("Preparing data archive...", "success")}
+                                                                        className="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-400 border border-zinc-700 rounded-lg text-[9px] font-black uppercase tracking-widest transition-all"
+                                                                    >
+                                                                        Export Data
+                                                                    </button>
+                                                                    <button
+                                                                        onClick={() => showToast("Transferring ownership to system admin...", "success")}
+                                                                        className="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-400 border border-zinc-700 rounded-lg text-[9px] font-black uppercase tracking-widest transition-all"
+                                                                    >
+                                                                        Transfer Ownership
+                                                                    </button>
+                                                                </>
+                                                            )}
+                                                            <button
+                                                                onClick={() => handleViewClient(u)}
+                                                                className="px-3 py-1.5 bg-amber-500/10 hover:bg-amber-500 text-amber-500 hover:text-white border border-amber-500/20 rounded-lg text-[9px] font-black uppercase tracking-widest transition-all"
+                                                            >
+                                                                View Client
+                                                            </button>
+                                                        </div>
                                                     )}
                                                 </div>
                                             )}

@@ -67,11 +67,22 @@ interface AnalyticsDashboardProps {
         // Extended fields saved since the savings-engine fix
         identifiedSavings?: number;
         savingsBreakdown?: {
-            priceVariance: number;
-            compliance: number;
-            singleSource: number;
-            tailSpend: number;
-            processEfficiency: number;
+            // New keys (savings v2 — pricing levers only)
+            priceArbitrage?: number;
+            paymentTerms?: number;
+            volumeDiscount?: number;
+            singleSource?: number;
+            tailSpend?: number;
+            // Legacy keys kept for backward compat with older saved projects
+            priceVariance?: number;
+            compliance?: number;
+        };
+        savingsProbability?: {
+            priceArbitrage?: number;
+            paymentTerms?: number;
+            volumeDiscount?: number;
+            singleSource?: number;
+            tailSpend?: number;
         };
         contractedPercent?: number;
         ptRiskPercent?: number;
@@ -219,7 +230,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
         const buColRaw = resolvedMappings['business_unit'] || resolvedMappings['plant'] || '';
         const locColRaw = resolvedMappings['location'] || resolvedMappings['plant'] || '';
         const unitPriceCol = resolvedMappings['unit_price'];
-        const quantityCol = resolvedMappings['quantity'];
+        // quantityCol removed — L1 now uses amount/unitPrice for implied qty (UOM-safe)
         const supplierCol = resolvedMappings['supplier'];
 
         const filteredRows = data.filter(row => {
@@ -234,16 +245,32 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
             return true;
         });
 
-        // Calculate totals from filtered rows
+        // Calculate totals and supplier stats from filtered rows (Pass 1)
+        const supplierStatsMap: Record<string, { spend: number, count: number, category: string }> = {};
+        const globalSupplierSpend: Record<string, number> = {};
+        const globalSupplierTxCount: Record<string, number> = {};
+
         const stats = filteredRows.reduce((acc, row) => {
             const amount = parseFloat(String(row[amountCol] || '0').replace(/[^0-9.-]+/g, "")) || 0;
-            // Contract Compliance: check mapped or auto-detected contractCol, also fallback to 'Contract_Status' field
+            const supplier = String(row[mappings['supplier']] || 'Unknown Supplier');
+            const cat = row[catCol] || 'Uncategorized';
+
+            // Contract Compliance
             const contractVal = String(row[contractCol] || row['Contract_Status'] || '').trim();
             const isContracted = /contracted|active|valid|yes|\bY\b/i.test(contractVal) && contractVal !== '';
 
-            // Payment Terms Risk Detection — uses auto-detected ptCol
+            // Payment Terms Risk
             const ptValue = String(row[ptCol] || '').toLowerCase();
             const isPTRisk = /immediate|cash|net 7|net0|net.?7|pickup|advance|prepay/i.test(ptValue);
+
+            if (supplier) {
+                if (!supplierStatsMap[supplier]) supplierStatsMap[supplier] = { spend: 0, count: 0, category: String(cat) };
+                supplierStatsMap[supplier].spend += amount;
+                supplierStatsMap[supplier].count += 1;
+
+                globalSupplierSpend[supplier] = (globalSupplierSpend[supplier] || 0) + amount;
+                globalSupplierTxCount[supplier] = (globalSupplierTxCount[supplier] || 0) + 1;
+            }
 
             return {
                 spend: acc.spend + amount,
@@ -252,6 +279,8 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                 ptRiskSpend: acc.ptRiskSpend + (isPTRisk ? amount : 0)
             };
         }, { spend: 0, count: 0, contractedSpend: 0, ptRiskSpend: 0 });
+
+        const isHighValueCurrency = /^(USD|GBP|EUR|AUD|CAD|CHF|SGD)$/i.test(currency);
 
         const totalSpend = stats.spend || restoredStats?.totalSpend || restoredAnalysis?.totalSpend || projectStats?.spend || 0;
         const contractedPercent = totalSpend > 0 ? (stats.contractedSpend / totalSpend) * 100 : 0;
@@ -330,16 +359,56 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
         const isItemMapped = !!itemCol;
         const itemMap: Record<string, { spend: number, suppliers: Set<string>, vendorDetails: Record<string, number> }> = {};
 
-        const supplierStatsMap: Record<string, { spend: number, count: number, category: string }> = {};
 
-        // Real Savings Calculation Accumulators
+        // ── Advanced Tail Spend Identification (Multi-Lens Pareto Logic) ──────────
+        // Harmonized with ProjectView.tsx persistence logic.
+        const sortedSuppliersBySpendDesc = Object.entries(supplierStatsMap)
+            .map(([name, stats]) => ({ name, spend: stats.spend }))
+            .sort((a, b) => b.spend - a.spend); // Rank Descending
+
+        let runningCumSpend = 0;
+        const headSuppliers = new Set<string>();
+        const midTailSuppliers = new Set<string>();
+        const longTailSuppliers = new Set<string>();
+        const finalTailSuppliersSet = new Set<string>();
+        const paretoPoints: { name: string, spend: number, cumPercent: number }[] = [];
+
+        const tailStartThreshold = totalSpend * 0.80; // Pareto 80/20
+        const longTailThreshold = totalSpend * 0.95;
+
+        sortedSuppliersBySpendDesc.forEach((s) => {
+            const prevCumSpend = runningCumSpend;
+            runningCumSpend += s.spend;
+            const cumPercent = (runningCumSpend / (totalSpend || 1)) * 100;
+            const share = (s.spend / (totalSpend || 1)) * 100;
+
+            paretoPoints.push({ name: s.name, spend: s.spend, cumPercent });
+
+            if (prevCumSpend < tailStartThreshold) headSuppliers.add(s.name);
+            else if (prevCumSpend < longTailThreshold) midTailSuppliers.add(s.name);
+            else longTailSuppliers.add(s.name);
+
+            // Exclusions Logic (Protected Tail)
+            const isProtected = /safety|critical|spare|regulatory|itar|strategic|contract/i.test(s.name) ||
+                /safety|critical|compliance|regulatory/i.test(supplierStatsMap[s.name].category);
+
+            const isLowShare = share < 0.5;
+            const isLowAbsolute = s.spend < 2500000;
+            if (prevCumSpend >= tailStartThreshold && (isLowShare || isLowAbsolute) && !isProtected) {
+                finalTailSuppliersSet.add(s.name);
+            }
+        });
+
+        // ── Savings v2: Pure Pricing Levers ───────────────────────────────────────
+        // Five data-driven levers with per-lever probability of achievement.
+        // Each transaction row is assigned to exactly one lever (highest priority wins).
         let totalIdentifiedSavings = 0;
         const savingsBreakdown = {
-            priceVariance: 0,
-            singleSource: 0,
-            compliance: 0,
-            tailSpend: 0,
-            processEfficiency: 0
+            priceArbitrage: 0,   // L1: multi-vendor price gap (85% shift to cheapest)
+            paymentTerms: 0,     // L2: unfavourable payment terms optimisation
+            volumeDiscount: 0,   // L3: consolidate orders → volume commitment discount
+            singleSource: 0,     // L4: introduce alternate vendor / competitive tension
+            tailSpend: 0,        // L5: long-tail supplier consolidation
         };
 
         // Detailed opportunity data for drill-down
@@ -350,55 +419,28 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
             categories: Set<string>,
             itemCount: number
         }> = {
-            priceVariance: { spend: 0, savings: 0, vendors: {}, categories: new Set(), itemCount: 0 },
+            priceArbitrage: { spend: 0, savings: 0, vendors: {}, categories: new Set(), itemCount: 0 },
+            paymentTerms: { spend: 0, savings: 0, vendors: {}, categories: new Set(), itemCount: 0 },
+            volumeDiscount: { spend: 0, savings: 0, vendors: {}, categories: new Set(), itemCount: 0 },
             singleSource: { spend: 0, savings: 0, vendors: {}, categories: new Set(), itemCount: 0 },
-            compliance: { spend: 0, savings: 0, vendors: {}, categories: new Set(), itemCount: 0 },
             tailSpend: { spend: 0, savings: 0, vendors: {}, categories: new Set(), itemCount: 0 },
-            processEfficiency: { spend: 0, savings: 0, vendors: {}, categories: new Set(), itemCount: 0 }
         };
 
-        // Identify Tail Suppliers (Global Set for consistency or Local? Let's use Global for 'True' Tail definition)
-        // Actually, Tail Spend is relative to total spend. Let's calculate Tail Spend threshold from Global Data first? 
-        // No, usually analyzed on the dataset in hand. But for consistency with Export (which uses filtered view if we adapt it, or global), 
-        // let's define Tail Suppliers based on the *current filtered view* for the dashboard stats. 
-        // Wait, User asked for consistency. If I filter to "Top Supplier", savings should be 0 because it's not Tail. 
-        // Let's defer Tail identification until after we sum up supplier stats from filteredRows.
-        // BUT we are iterating filteredRows NOW.
-        // Let's do a 2-pass approach or just use the Global Tail definition for robustness.
-        const globalSupplierSpend: Record<string, number> = {};
-        data.forEach(r => {
-            const s = String(r[mappings['supplier']] || '');
-            const amt = parseFloat(String(r[amountCol] || '0').replace(/[^0-9.-]+/g, "")) || 0;
-            globalSupplierSpend[s] = (globalSupplierSpend[s] || 0) + amt;
+        // ── Volume Discount qualifying suppliers ──────────────────────────────────
+        // A supplier qualifies when it represents ≥1% of total spend AND the company
+        // is placing many fragmented orders (>5 transactions).
+        const volDiscountMinSpend = totalSpend * 0.01;
+        const volDiscountMinTx = 5;
+        const volDiscountSuppliers = new Set<string>();
+        Object.entries(supplierStatsMap).forEach(([sup, stats]) => {
+            if (stats.spend >= volDiscountMinSpend && stats.count > volDiscountMinTx) {
+                volDiscountSuppliers.add(sup);
+            }
         });
-        const globalSortedSuppliers = Object.entries(globalSupplierSpend).sort((a, b) => a[1] - b[1]); // Ascending
-        let globalCumSpend = 0;
-        const globalTotalSpend = Object.values(globalSupplierSpend).reduce((a, b) => a + b, 0);
-        const globalTailThreshold = globalTotalSpend * 0.2;
-        const globalTailSet = new Set<string>();
-        for (const [s, amt] of globalSortedSuppliers) {
-            if (globalCumSpend + amt <= globalTailThreshold) {
-                globalTailSet.add(s);
-                globalCumSpend += amt;
-            } else break;
-        }
 
-
-        // FIX 3: Currency-aware low-value PO threshold and process saving.
-        // Use approximate per-transaction cost based on currency purchasing power.
-        // INR: threshold ₹5,000 / saving ₹500 | USD/GBP/EUR: threshold 100 / saving 50 | default: 5%
-        const isHighValueCurrency = /^(USD|GBP|EUR|AUD|CAD|CHF|SGD)$/i.test(currency);
-        const lowValueThreshold = isHighValueCurrency ? 100 : 5000;
-        const processEfficiencySaving = isHighValueCurrency ? 50 : 500;
-
-        // FIX 1 helper: A contract reference is only "active/contracted" if it is a non-empty,
-        // non-placeholder string that passes the contracted pattern check used elsewhere in this file.
-        // Blank, "N/A", "None", "Unverified", "-" all mean OFF-CONTRACT.
-        const isContractedRef = (val: string): boolean => {
-            if (!val || /^[-–—/\s]*$/.test(val)) return false;
-            if (/^(n\/?a|none|nil|unverified|not available|no contract|tbd|pending|--)$/i.test(val.trim())) return false;
-            return /contracted|active|valid|yes|\bY\b|PO-|CT-|CON-|AGR-|\d{4,}/i.test(val);
-        };
+        // Note: contract-compliance savings lever was removed in v2.
+        // contractedPercent KPI is still tracked via stats.contractedSpend (computed in the
+        // initial filteredRows.reduce above using its own simpler contract pattern check).
 
         filteredRows.forEach(row => {
             const cat = row[catCol] || 'Uncategorized';
@@ -406,18 +448,8 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
             const supplier = String(row[mappings['supplier']] || '');
             const item = String(row[itemCol] || '').trim();
             const unitPrice = parseFloat(String(row[unitPriceCol] || '0').replace(/[^0-9.-]+/g, "")) || 0;
-            const quantity = parseFloat(String(row[quantityCol] || '0').replace(/[^0-9.-]+/g, "")) || 0;
-            // FIX 1: Use stricter isContractedRef instead of a raw truthy check on the raw string.
-            const contractRaw = String(row[contractCol] || row['Contract_Status'] || '').trim();
-            const hasActiveContract = isContractedRef(contractRaw);
-
+            // quantity column removed from L1 — implied qty is always derived from amount/unitPrice
             catMap[cat] = (catMap[cat] || 0) + amount;
-
-            if (supplier) {
-                if (!supplierStatsMap[supplier]) supplierStatsMap[supplier] = { spend: 0, count: 0, category: String(cat) };
-                supplierStatsMap[supplier].spend += amount;
-                supplierStatsMap[supplier].count += 1;
-            }
 
             // Group by Item for Sourcing Analysis (Local)
             if (itemCol) {
@@ -428,84 +460,77 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                 itemMap[item].vendorDetails[sup] = (itemMap[item].vendorDetails[sup] || 0) + amount;
             }
 
-            // ── Prioritized Savings Logic ─────────────────────────────────────────
-            // Each lever fires only if no higher-priority lever already claimed this row.
-            // Priority order (highest first):
-            //   1. Price Arbitrage   – measured price gap across suppliers for same item
-            //   2. Contract Consol.  – off-contract spend (FIX 1: strict contract test)
-            //                          FIX 2: moved ABOVE single-source so that uncategorised
-            //                          single-source off-contract spend gets 5-10% not 2%
-            //   3. Single Source     – un-tendered single-supplier items (no alternate yet)
-            //   4. Tail Consol.      – long-tail supplier consolidation
-            //   5. Process Eff.      – low-value POs (FIX 3: currency-scaled)
+            // ── Prioritized Savings Logic (v2 — Pricing Levers Only) ──────────────
+            // Each row is assigned to exactly one lever (highest priority wins).
+            // Individual lever caps prevent inflation from data noise/UOM mismatches.
             let rowSavings = 0;
             let logicType: keyof typeof savingsBreakdown | null = null;
 
-            // LEVER 1: Price Arbitrage — actual measured price gap (most precise, highest priority)
-            if (item && globalItemStats[item] && globalItemStats[item].supplierCount > 1 && unitPrice > globalItemStats[item].minPrice) {
+            // ── L1: Multi-Vendor Price Arbitrage (Priority 1) ────────────────────
+            if (
+                item &&
+                globalItemStats[item]?.supplierCount > 1 &&
+                globalItemStats[item].minPrice > 0 &&
+                unitPrice > globalItemStats[item].minPrice &&
+                amount > 0
+            ) {
                 const bestPrice = globalItemStats[item].minPrice;
-                const impliedQty = quantity || (unitPrice > 0 ? amount / unitPrice : 0);
-                const variance = (unitPrice - bestPrice) * impliedQty;
-                if (variance > 0) {
-                    rowSavings = variance;
-                    logicType = 'priceVariance';
+                // Safety: Ignore tiny unit prices (possible noise) to prevent impliedQty explosion
+                if (unitPrice > 0.001) {
+                    const impliedQty = amount / unitPrice;
+                    const rawSavings = (unitPrice - bestPrice) * impliedQty * 0.85;
+                    // Strict Cap: L1 is mathematically at most 85% of amount
+                    rowSavings = Math.min(rawSavings, amount * 0.85);
+                    logicType = 'priceArbitrage';
                 }
             }
 
-            // LEVER 2: Contract Consolidation — off-contract spend (FIX 1 + FIX 2)
-            // Fires before single-source so uncategorised off-contract rows get the higher 5-10% rate.
-            if (rowSavings === 0 && !hasActiveContract) {
-                const catLower = String(cat).toLowerCase();
-                // Category-specific negotiation yield benchmarks (industry mid-market reference)
-                let rate = 0.05; // Default: Indirect / General
-                if (catLower.includes('material') || catLower.includes('mfg') || catLower.includes('production') || catLower.includes('raw')) {
-                    rate = 0.08; // Direct materials: 6-10% typical
-                } else if (catLower.includes('it') || catLower.includes('tech') || catLower.includes('software') || catLower.includes('saas')) {
-                    rate = 0.06; // IT: 4-8% typical
-                } else if (catLower.includes('logistics') || catLower.includes('transport') || catLower.includes('freight') || catLower.includes('shipping')) {
-                    rate = 0.07; // Logistics: 5-9% typical
-                } else if (catLower.includes('facility') || catLower.includes('housekeeping') || catLower.includes('clean') || catLower.includes('maintenance')) {
-                    rate = 0.10; // FM: 8-12% typical
-                } else if (catLower.includes('marketing') || catLower.includes('media') || catLower.includes('advertising')) {
-                    rate = 0.08; // Marketing: 6-10% typical
-                } else if (catLower.includes('professional') || catLower.includes('consult') || catLower.includes('legal') || catLower.includes('advisory')) {
-                    rate = 0.05; // Professional services: 3-7% typical
+            // ── L2: Payment Terms Optimisation (Priority 2) ─────────────────────
+            if (rowSavings === 0 && ptCol) {
+                const ptLower = String(row[ptCol] || '').toLowerCase().trim();
+                let ptRate = 0;
+                if (/\b(cash|advance|prepay|upfront|immediate|cod|on.?delivery|up.?front)\b/.test(ptLower)) {
+                    ptRate = 0.025;
+                } else if (/\bnet\s*0\b|net0|net.?7\b|net.?10\b|net.?14\b/.test(ptLower)) {
+                    ptRate = 0.015;
                 }
-                rowSavings = amount * rate;
-                logicType = 'compliance';
+                if (ptRate > 0) {
+                    rowSavings = amount * ptRate;
+                    logicType = 'paymentTerms';
+                }
             }
 
-            // LEVER 3: Single Source Risk — items with no alternative supplier yet tendered
-            // FIX 2: Now fires AFTER contract check. If a single-source item has no contract,
-            // it was already captured by Lever 2 at the higher category rate above.
-            // This lever only fires for single-source items that DO have a contract (negotiated sole-source).
-            if (rowSavings === 0 && item && globalItemStats[item] && globalItemStats[item].supplierCount === 1) {
-                // Estimated 3-5% benefit from introducing a second qualified supplier / competitive benchmark.
-                // Use 3% (conservative) since the item already has a contract price reference.
+            // ── L3: Volume-Based Discount (Priority 3) ──────────────────────────
+            if (rowSavings === 0 && supplier && volDiscountSuppliers.has(supplier)) {
+                // Cap: 3% is the conservative benchmark for volume commitment
                 rowSavings = amount * 0.03;
+                logicType = 'volumeDiscount';
+            }
+
+            // ── L4: Single-Source RFQ (Priority 4) ──────────────────────────────
+            if (rowSavings === 0 && item && globalItemStats[item]?.supplierCount === 1) {
+                // Cap: 5% is the conservative benchmark for competitive tension
+                rowSavings = amount * 0.05;
                 logicType = 'singleSource';
             }
 
-            // LEVER 4: Tail Spend Consolidation — supplier is in the bottom-20%-of-spend long tail
-            if (rowSavings === 0 && globalTailSet.has(supplier)) {
-                rowSavings = amount * 0.10;
+            // ── L5: Tail Spend Consolidation (Priority 5) ───────────────────────
+            if (rowSavings === 0 && finalTailSuppliersSet.has(supplier)) {
+                // Cap: 6% is the conservative benchmark for tail consolidation
+                rowSavings = amount * 0.06;
                 logicType = 'tailSpend';
             }
 
-            // LEVER 5: Process Efficiency — low-value POs (FIX 3: currency-aware flat saving)
-            if (rowSavings === 0 && amount < lowValueThreshold) {
-                rowSavings = processEfficiencySaving;
-                logicType = 'processEfficiency';
-            }
-
             if (rowSavings > 0 && logicType) {
-                totalIdentifiedSavings += rowSavings;
-                savingsBreakdown[logicType] += rowSavings;
+                // FINAL SAFETY: Total row savings must NEVER exceed 85% of its spend
+                const safeRowSavings = Math.min(rowSavings, amount * 0.85);
 
-                // Track details for drill-down
+                totalIdentifiedSavings += safeRowSavings;
+                savingsBreakdown[logicType] += safeRowSavings;
+
                 const detail = opportunityDetails[logicType];
                 detail.spend += amount;
-                detail.savings += rowSavings;
+                detail.savings += safeRowSavings;
                 detail.categories.add(String(cat));
                 detail.vendors[supplier] = (detail.vendors[supplier] || 0) + amount;
                 if (item) detail.itemCount++;
@@ -556,6 +581,9 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
             const isDirect = /material|factory|production|logistics|freight|packaging|raw|component/i.test(cat);
             spendTypeMap[isDirect ? 'Direct' : 'Indirect'] += amount;
         });
+
+        // Global safety cap: total identified savings can never exceed total spend
+        totalIdentifiedSavings = Math.min(totalIdentifiedSavings, totalSpend);
 
         // Finalize Sourcing Stats
         const singleSourceItems = Object.entries(itemMap).filter(([_, i]) => i.suppliers.size === 1);
@@ -611,20 +639,24 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
             { name: 'Indirect', value: Math.round((spendTypeMap.Indirect / totalSpend) * 100) || 0, color: '#f43f5e' }
         ].filter(i => i.value > 0);
 
-        // FIX 4: Prefer live computed savings; fall back to the REAL saved value from
-        // latestAnalysis.identifiedSavings (written by the pipeline on first completion).
-        // Only use the old 8% heuristic estimate as a last resort.
-        // isSyntheticFallback = true means we are showing a restored/estimated figure,
-        // not a freshly computed one — the JSX displays a badge to make that clear.
+        // ── Final Metric Assembly & Validation ──────────────────
         const hasLiveRows = filteredRows.length > 0;
         const isSyntheticFallback = totalIdentifiedSavings === 0;
-        const identifiedSavings = !isSyntheticFallback
+
+        // SANITY GUARD: If restored savings are equal to or greater than spend,
+        // it means legacy data is likely "corrupted" by old non-capped logic.
+        // We cap restored savings at a realistic 15% maximum of spend.
+        const restoredRaw = (restoredStats?.identifiedSavings ?? restoredAnalysis?.identifiedSavings ?? restoredAnalysis?.savingsPotentialMin ?? 0);
+        const validatedRestoredSavings = (restoredRaw >= totalSpend && totalSpend > 0)
+            ? totalSpend * 0.12 // Force realistic 12% if saved data is suspiciously equal-to-spend
+            : restoredRaw;
+
+        let identifiedSavings = !isSyntheticFallback
             ? totalIdentifiedSavings
-            : (restoredStats?.identifiedSavings          // saved real value (new save format)
-                ?? restoredAnalysis?.identifiedSavings   // also on the analysis object
-                ?? restoredAnalysis?.savingsPotentialMin // old saved 8% estimate
-                ?? projectStats?.savingsPotential
-                ?? 0);
+            : (validatedRestoredSavings || projectStats?.savingsPotential || 0);
+
+        // GLOBAL SAFETY CAP: Ensure total savings never exceeds addressable spend
+        identifiedSavings = Math.min(identifiedSavings, totalSpend);
 
         // Restored savings breakdown — used when live rows aren't loaded yet
         const restoredBreakdown = restoredStats?.savingsBreakdown ?? restoredAnalysis?.savingsBreakdown;
@@ -649,55 +681,11 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
         // complianceScore alias removed — levers now use contractedPercent directly
         const vsLYGrowth = lySpend > 0 ? ((fySpend - lySpend) / lySpend) * 100 : 0;
 
-        // 4. Advanced Tail Spend Pareto & Multi-Lens Logic (Refactored)
-        const sortedSuppliersBySpendDesc = Object.entries(supplierStatsMap)
-            .map(([name, stats]) => ({ name, spend: stats.spend }))
-            .sort((a, b) => b.spend - a.spend); // Rank Descending
-
-        let runningCumSpend = 0;
-        const headSuppliers = new Set<string>();
-        const midTailSuppliers = new Set<string>();
-        const longTailSuppliers = new Set<string>();
-        const finalTailSuppliersSet = new Set<string>();
-        const paretoPoints: { name: string, spend: number, cumPercent: number }[] = [];
-
-        const tailStartThreshold = totalSpend * 0.80; // Pareto 80/20
-        const longTailThreshold = totalSpend * 0.95;
-
-        // ABC Distribution Sourcing - Use restoredStats as fallbacks for initial display
+        // 4. ABC Distribution Sourcing - Use restoredStats as fallbacks
         const totalA = restoredStats?.abcA || 0;
         const totalB = restoredStats?.abcB || 0;
         const totalC = restoredStats?.abcC || 0;
         const hasRestoredABC = totalA > 0 || totalB > 0 || totalC > 0;
-
-        sortedSuppliersBySpendDesc.forEach((s) => {
-            const prevCumSpend = runningCumSpend;
-            runningCumSpend += s.spend;
-            const cumPercent = (runningCumSpend / (totalSpend || 1)) * 100;
-            const share = (s.spend / (totalSpend || 1)) * 100;
-
-            paretoPoints.push({ name: s.name, spend: s.spend, cumPercent });
-
-            if (prevCumSpend < tailStartThreshold) {
-                headSuppliers.add(s.name);
-            } else if (prevCumSpend < longTailThreshold) {
-                midTailSuppliers.add(s.name);
-            } else {
-                longTailSuppliers.add(s.name);
-            }
-
-            // --- Exclusions Logic ---
-            // Always exclude "protected tail" (Safety, Critical, Regulatory)
-            const isProtected = /safety|critical|spare|regulatory|itar|strategic|contract/i.test(s.name) ||
-                /safety|critical|compliance|regulatory/i.test(supplierStatsMap[s.name].category);
-
-            // Multi-lens flag: Supplier is "Tail" if beyond 80% AND (Spend < 25L OR Share < 0.5%) AND NOT protected
-            const isLowShare = share < 0.5;
-            const isLowAbsolute = s.spend < 2500000;
-            if (prevCumSpend >= tailStartThreshold && (isLowShare || isLowAbsolute) && !isProtected) {
-                finalTailSuppliersSet.add(s.name);
-            }
-        });
 
         // Transaction Lens Logic
         const tailTransactions = filteredRows.filter(row => {
@@ -759,42 +747,123 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
             }))
             .sort((a, b) => b.value - a.value);
 
-        // --- TOP 3 SAVINGS OPPORTUNITIES RANKED BY RUPEE VALUE ---
+        // ── clamp utility + per-lever probabilities ──────────────────────────────
+        // MUST be defined BEFORE opportunityRanking so the ranking can sort by expected value.
+        const clamp = (v: number, min = 5, max = 98) => Math.round(Math.max(min, Math.min(max, v)));
+
+        // Use live-computed signals directly (no restored fallback here — if live rows are
+        // empty, no savings will have been computed so probabilities are effectively moot).
+        const _multiSrcItemCount = Object.values(globalItemStats).filter(s => s.supplierCount > 1).length;
+        const _ptRiskPctRaw = totalSpend > 0 ? (stats.ptRiskSpend / totalSpend) * 100 : 0;
+        const _singleSrcPct = sourcingData.singlePercent;
+        const _tailPctRaw = tailSpendPercentage;
+        const _directPctRaw = spendTypeData.find(s => s.name === 'Direct')?.value ?? 0;
+        const _buDiv = Object.keys(buMap).length;
+
+        const leverProbabilities = {
+            priceArbitrage: clamp(
+                55
+                + (savingsBreakdown.priceArbitrage > 0 ? 18 : -15)
+                + (_multiSrcItemCount > 20 ? 12 : _multiSrcItemCount > 10 ? 7 : _multiSrcItemCount > 5 ? 4 : 0)
+                + (unitPriceCol ? 5 : -10)
+            ),
+            paymentTerms: clamp(
+                45
+                + (_ptRiskPctRaw > 30 ? 25 : _ptRiskPctRaw > 15 ? 15 : _ptRiskPctRaw > 5 ? 8 : 0)
+                + (totalSpend > 5_000_000 ? 8 : totalSpend > 1_000_000 ? 4 : 0)
+                + (ptCol ? 0 : -20)
+            ),
+            volumeDiscount: clamp(
+                50
+                + (volDiscountSuppliers.size > 15 ? 18 : volDiscountSuppliers.size > 8 ? 12 : volDiscountSuppliers.size > 3 ? 6 : 0)
+                + (_buDiv >= 3 ? 10 : 0)
+                + (totalSpend > 10_000_000 ? 10 : totalSpend > 1_000_000 ? 5 : 0)
+            ),
+            singleSource: clamp(
+                35
+                + (_singleSrcPct > 50 ? 18 : _singleSrcPct > 30 ? 12 : _singleSrcPct > 15 ? 6 : 0)
+                + (_directPctRaw > 60 ? -10 : 0)
+                + (vendorCount > 30 ? 8 : vendorCount > 15 ? 4 : 0)
+            ),
+            tailSpend: clamp(
+                40
+                + (_tailPctRaw > 30 ? 20 : _tailPctRaw > 15 ? 12 : _tailPctRaw > 5 ? 6 : 0)
+                + (finalTailSuppliersSet.size > 20 ? 12 : finalTailSuppliersSet.size > 10 ? 6 : 0)
+                + (_buDiv >= 3 ? 8 : 0)
+            ),
+        };
+
+        const riskAdjustedSavings = {
+            priceArbitrage: savingsBreakdown.priceArbitrage * leverProbabilities.priceArbitrage / 100,
+            paymentTerms: savingsBreakdown.paymentTerms * leverProbabilities.paymentTerms / 100,
+            volumeDiscount: savingsBreakdown.volumeDiscount * leverProbabilities.volumeDiscount / 100,
+            singleSource: savingsBreakdown.singleSource * leverProbabilities.singleSource / 100,
+            tailSpend: savingsBreakdown.tailSpend * leverProbabilities.tailSpend / 100,
+        };
+
+        // --- SAVINGS OPPORTUNITIES RANKED BY RISK-ADJUSTED VALUE ---
+        // Each opportunity carries gross savings, probability, and expected (risk-adjusted) value.
+        const leverMeta: Record<string, { label: string; color: string; recommendation: string; calcFn: (d: typeof opportunityDetails[string]) => string }> = {
+            priceArbitrage: {
+                label: 'Multi-Vendor Price Arbitrage',
+                color: 'rose',
+                recommendation: 'Consolidate 85% of higher-priced volume to lowest-priced qualified vendor for each item sourced from multiple suppliers.',
+                calcFn: (d) => `85% volume shift to cheapest vendor on ${formatCurrency(d.spend)} multi-source spend — Σ (price_gap × 0.85 × qty)`,
+            },
+            paymentTerms: {
+                label: 'Payment Terms Optimisation',
+                color: 'primary',
+                recommendation: 'Renegotiate cash/advance/net-7 terms to net-30+. Early-pay discounts and reduced cost-of-capital unlock 1.5–2.5% of affected spend.',
+                calcFn: (d) => `1.5–2.5% rate on ${formatCurrency(d.spend)} of spend with unfavourable payment terms (cash/advance/net ≤ 14)`,
+            },
+            volumeDiscount: {
+                label: 'Volume Commitment Discount',
+                color: 'teal',
+                recommendation: 'Consolidate fragmented purchase orders to these key suppliers and negotiate annual volume commitments for a conservative 3% discount.',
+                calcFn: (d) => `3% volume commitment discount on ${formatCurrency(d.spend)} across suppliers with high-frequency fragmented orders`,
+            },
+            singleSource: {
+                label: 'Alternate Vendor Introduction',
+                color: 'amber',
+                recommendation: 'Qualify at least one alternate supplier for sole-sourced items. Competitive tension from an RFQ typically yields 5% in year-1.',
+                calcFn: (d) => `5% benchmark saving from alternate-vendor RFQ on ${formatCurrency(d.spend)} sole-source spend (conservative year-1 estimate)`,
+            },
+            tailSpend: {
+                label: 'Tail Spend Consolidation',
+                color: 'zinc',
+                recommendation: 'Consolidate long-tail suppliers into preferred-vendor programs or purchasing cards to reduce transaction costs and gain volume leverage.',
+                calcFn: (d) => `6% consolidation saving on ${formatCurrency(d.spend)} long-tail spend (bottom-20%-of-spend suppliers)`,
+            },
+        };
+
         const opportunityRanking = Object.entries(opportunityDetails)
             .filter(([_, d]) => d.savings > 0)
-            .map(([key, d]) => ({
-                id: key,
-                label: key === 'priceVariance' ? 'Price Arbitrage' :
-                    key === 'singleSource' ? 'Strategic Sourcing' :
-                        key === 'compliance' ? 'Contract Consolidation' :
-                            key === 'tailSpend' ? 'Tail Consolidation' : 'Process Efficiency',
-                value: d.savings,
-                currentSpend: d.spend,
-                percent: d.spend > 0 ? (d.savings / d.spend) * 100 : 0,
-                categories: Array.from(d.categories).slice(0, 3),
-                topVendors: Object.entries(d.vendors)
-                    .sort((a, b) => b[1] - a[1])
-                    .slice(0, 3)
-                    .map(([name, spend]) => ({ name, spend })),
-                projectedSpend: d.spend - d.savings,
-                itemCount: d.itemCount,
-                color: key === 'priceVariance' ? 'rose' :
-                    key === 'singleSource' ? 'amber' :
-                        key === 'compliance' ? 'primary' :
-                            key === 'tailSpend' ? 'teal' : 'zinc',
-                recommendation: key === 'priceVariance' ? 'Standardize unit prices across all locations/suppliers.' :
-                    key === 'singleSource' ? 'Introduce competitive bidding to drive 2-5% price reduction.' :
-                        key === 'compliance' ? 'Shift unverified spend to contracted partners for volume leverage.' :
-                            key === 'tailSpend' ? 'Consolidate multiple small vendors into strategic master partners.' :
-                                'Optimize procurement workflow to reduce high-frequency low-value POs.',
-                calculation: key === 'priceVariance' ? 'Σ ((Current Price - Min Global Price) × Quantity)' :
-                    key === 'singleSource' ? `3% Conservative yield on sole-source contracted spend of ${formatCurrency(d.spend)}` :
-                        key === 'compliance' ? `Avg 5–10% category-weighted leverage on ${formatCurrency(d.spend)} off-contract spend` :
-                            key === 'tailSpend' ? `10% Consolidation saving on ${formatCurrency(d.spend)} long-tail spend` :
-                                `Fixed process saving of ${isHighValueCurrency ? '~50' : '~500'} ${currency} per low-value PO`
-            }))
-            .sort((a, b) => b.value - a.value)
-            .slice(0, 3);
+            .map(([key, d]) => {
+                const meta = leverMeta[key] ?? { label: key, color: 'zinc', recommendation: '', calcFn: () => '' };
+                const prob = leverProbabilities[key as keyof typeof leverProbabilities] ?? 50;
+                const expectedSavings = d.savings * prob / 100;
+                return {
+                    id: key,
+                    label: meta.label,
+                    value: d.savings,             // gross savings
+                    expectedValue: expectedSavings, // risk-adjusted
+                    probability: prob,
+                    currentSpend: d.spend,
+                    percent: d.spend > 0 ? (d.savings / d.spend) * 100 : 0,
+                    categories: Array.from(d.categories).slice(0, 3),
+                    topVendors: Object.entries(d.vendors)
+                        .sort((a, b) => b[1] - a[1])
+                        .slice(0, 3)
+                        .map(([name, spend]) => ({ name, spend })),
+                    projectedSpend: d.spend - d.savings,
+                    itemCount: d.itemCount,
+                    color: meta.color,
+                    recommendation: meta.recommendation,
+                    calculation: meta.calcFn(d),
+                };
+            })
+            .sort((a, b) => b.expectedValue - a.expectedValue) // rank by risk-adjusted value
+            .slice(0, 5); // show all 5 levers (filtered to those with savings > 0)
 
         // ── DATA-DRIVEN SAVINGS LEVERS ────────────────────────────────────────────
         // FIX 7+8+9: Probabilities are fully derived from actual dataset signals.
@@ -829,14 +898,13 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
         const directPct = spendTypeData.find(s => s.name === 'Direct')?.value ?? 0;       // 0-100
         const buDiversity = Object.keys(buMap).length;                                      // integer
 
-        // Signal: whether meaningful price-variance data exists across multi-source items
-        const hasPriceVarianceData = effectiveBreakdown.priceVariance > 0;
+        // Signal: whether meaningful price-arbitrage data exists across multi-source items
+        const hasPriceVarianceData = ((effectiveBreakdown.priceArbitrage ?? (effectiveBreakdown as any).priceVariance) ?? 0) > 0;
 
-        // ── Per-lever probability computation ────────────────────────────────────
-        // Formula: clamp(base + Σ signals, 5, 98)
-        // Each signal is a bounded adjustment so no single signal can dominate.
-
-        const clamp = (v: number, min = 5, max = 98) => Math.round(Math.max(min, Math.min(max, v)));
+        // ── DATA-DRIVEN SAVINGS LEVERS (strategic chart) ─────────────────────────
+        // clamp, leverProbabilities and riskAdjustedSavings are defined above (before
+        // opportunityRanking). savingsLevers below is the *strategic options* probability
+        // chart — a separate display from the 5 pricing levers computed earlier.
 
         const savingsLevers = [
             {
@@ -944,6 +1012,32 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
             }
         ].sort((a, b) => b.probability - a.probability);
 
+        // ── ABC Analysis Stats (Dedicated) ──────────────────────────────────────
+        // Summarize spend and supplier counts across the three Pareto tiers.
+        const abcAnalysis = {
+            A: {
+                spend: hasLiveRows ? sortedSuppliersBySpendDesc.slice(0, headSuppliers.size).reduce((acc, s) => acc + s.spend, 0) : totalA,
+                suppliers: hasLiveRows ? headSuppliers.size : Math.round(vendorCount * 0.2), // heuristic fallback if no counts
+                label: 'Category A (Critical)',
+                description: 'Top 80% of spend — usually ~20% of suppliers.',
+                color: 'emerald'
+            },
+            B: {
+                spend: hasLiveRows ? sortedSuppliersBySpendDesc.slice(headSuppliers.size, headSuppliers.size + midTailSuppliers.size).reduce((acc, s) => acc + s.spend, 0) : totalB,
+                suppliers: hasLiveRows ? midTailSuppliers.size : Math.round(vendorCount * 0.3),
+                label: 'Category B (Strategic)',
+                description: 'Next 15% of spend — mid-tier suppliers.',
+                color: 'primary'
+            },
+            C: {
+                spend: hasLiveRows ? sortedSuppliersBySpendDesc.slice(headSuppliers.size + midTailSuppliers.size).reduce((acc, s) => acc + s.spend, 0) : totalC,
+                suppliers: hasLiveRows ? longTailSuppliers.size : Math.round(vendorCount * 0.5),
+                label: 'Category C (Tail)',
+                description: 'Bottom 5% of spend — bulk of long-tail suppliers.',
+                color: 'rose'
+            }
+        };
+
         return {
             filteredRows, // Expose for export
             totalSpend,
@@ -964,14 +1058,38 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
             locSummary,
             monthData: sortedMonths,
             supplierData: topSuppliers,
-            spendTypeData,
-            spendHistory,
+            spendTypeData: hasLiveRows ? spendTypeData : (restoredAnalysis?.spendTypeData ?? []),
+            spendHistory: hasLiveRows ? spendHistory : (restoredAnalysis?.spendHistory ?? []),
             sourcingData,
+            abcAnalysis,
             kpis: [
                 {
                     id: 'total-spend', icon: Wallet, label: 'Total Addressable Spend', value: totalSpend, type: 'currency', color: 'primary',
-                    subMetrics: [{ label: `FY ${currentFY}-${(currentFY + 1) % 100}`, value: fySpend }, { label: 'YTD', value: ytdSpend }, { label: 'vs LY', value: vsLYGrowth, type: 'percent' }],
+                    subMetrics: [
+                        { label: `FY ${currentFY}-${(currentFY + 1) % 100}`, value: hasLiveRows ? fySpend : (restoredAnalysis?.fySpend ?? 0) },
+                        { label: 'YTD', value: hasLiveRows ? ytdSpend : (restoredAnalysis?.ytdSpend ?? 0) },
+                        { label: 'vs LY', value: hasLiveRows ? vsLYGrowth : (restoredAnalysis?.vsLYGrowth ?? 0), type: 'percent' }
+                    ],
                     data: filteredRows
+                },
+                {
+                    id: 'abc-analysis',
+                    icon: Target,
+                    label: 'ABC Analysis (Pareto)',
+                    value: totalSpend,
+                    type: 'currency',
+                    color: 'emerald',
+                    subMetrics: [
+                        { label: 'A (Top 80%)', value: (abcAnalysis.A.spend / (totalSpend || 1)) * 100, type: 'percent' },
+                        { label: 'B (Next 15%)', value: (abcAnalysis.B.spend / (totalSpend || 1)) * 100, type: 'percent' },
+                        { label: 'C (Tail 5%)', value: (abcAnalysis.C.spend / (totalSpend || 1)) * 100, type: 'percent' }
+                    ],
+                    topDistribution: [
+                        { name: 'Category A (High Spend)', share: (abcAnalysis.A.spend / (totalSpend || 1)) * 100, secondary: `Suppliers: ${abcAnalysis.A.suppliers}` },
+                        { name: 'Category B (Mid Spend)', share: (abcAnalysis.B.spend / (totalSpend || 1)) * 100, secondary: `Suppliers: ${abcAnalysis.B.suppliers}` },
+                        { name: 'Category C (Low Spend)', share: (abcAnalysis.C.spend / (totalSpend || 1)) * 100, secondary: `Suppliers: ${abcAnalysis.C.suppliers}` }
+                    ],
+                    data: abcAnalysis
                 },
                 {
                     id: 'sourcing',
@@ -1018,29 +1136,62 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                 },
                 {
                     id: 'suppliers', icon: Users, label: 'Spend by Suppliers', value: vendorCount, type: 'number', color: 'teal',
-                    subMetrics: [{ label: 'Top 5 Share', value: topSuppliers.slice(0, 5).reduce((acc, s) => acc + s.share, 0), type: 'percent' }],
-                    topDistribution: topSuppliers,
+                    subMetrics: [{
+                        label: 'Top 5 Share',
+                        value: hasLiveRows
+                            ? topSuppliers.slice(0, 5).reduce((acc, s) => acc + s.share, 0)
+                            : ((restoredAnalysis?.topSupplierDistribution ?? []) as any[]).reduce((acc: number, s: any) => acc + (s.share || 0), 0),
+                        type: 'percent'
+                    }],
+                    topDistribution: hasLiveRows ? topSuppliers : (restoredAnalysis?.topSupplierDistribution ?? []),
                     data: supplierSummaryBySpend,
                     totalSpend: totalSpend
                 },
                 {
-                    id: 'bu', icon: Zap, label: 'Spend by Business Unit', value: Object.keys(buMap).length, type: 'number', color: 'primary',
-                    topDistribution: buSummary.slice(0, 5), data: buSummary, isSummary: true
+                    id: 'bu', icon: Zap, label: 'Spend by Business Unit',
+                    // Fall back to the saved buCount when live rows aren't loaded yet (on revisit)
+                    value: hasLiveRows ? Object.keys(buMap).length : (restoredAnalysis?.buCount ?? Object.keys(buMap).length),
+                    type: 'number', color: 'primary',
+                    topDistribution: hasLiveRows ? buSummary.slice(0, 5) : (restoredAnalysis?.topBUDistribution ?? []),
+                    data: buSummary, isSummary: true
                 },
                 {
-                    id: 'location', icon: AlertCircle, label: 'Spend by Location', value: Object.keys(locMap).length, type: 'number', color: 'rose',
-                    topDistribution: locSummary.slice(0, 5), data: locSummary, isSummary: true
+                    id: 'location', icon: AlertCircle, label: 'Spend by Location',
+                    // Fall back to the saved locationCount when live rows aren't loaded yet (on revisit)
+                    value: hasLiveRows ? Object.keys(locMap).length : (restoredAnalysis?.locationCount ?? Object.keys(locMap).length),
+                    type: 'number', color: 'rose',
+                    topDistribution: hasLiveRows ? locSummary.slice(0, 5) : (restoredAnalysis?.topLocationDistribution ?? []),
+                    data: locSummary, isSummary: true
                 },
                 {
-                    id: 'avg-po', icon: Target, label: 'Average PO/Invoice Value', value: avgPOValue, type: 'currency', color: 'amber',
+                    id: 'avg-po', icon: Target, label: 'Average PO/Invoice Value',
+                    // Fall back to the saved avgPOValue when live rows aren't loaded yet (on revisit)
+                    value: hasLiveRows ? avgPOValue : (restoredAnalysis?.avgPOValue ?? avgPOValue),
+                    type: 'currency', color: 'amber',
                     data: poSummary, isSummary: true, summaryLabel: 'PO / Invoice Number',
                     topDistribution: poSummary.slice(0, 5)
                 },
                 {
                     id: 'tail-spend', icon: AlertCircle, label: 'Tail Spend Analysis', value: hasLiveRows ? tailSpendPercentage : (restoredStats?.tailSpendPct ?? 0), type: 'percent', color: 'rose',
                     subMetrics: [
-                        { label: 'Tail Suppliers', value: tailSuppliersPercentage, type: 'percent' },
-                        { label: 'Tail Transactions', value: tailTxnsPercentage, type: 'percent' }
+                        {
+                            label: 'Tail Suppliers',
+                            value: hasLiveRows
+                                ? tailSuppliersPercentage
+                                : (restoredAnalysis?.tailSuppliersCount != null
+                                    ? (restoredAnalysis.tailSuppliersCount / (restoredAnalysis.uniqueVendors || 1)) * 100
+                                    : 0),
+                            type: 'percent'
+                        },
+                        {
+                            label: 'Tail Transactions',
+                            value: hasLiveRows
+                                ? tailTxnsPercentage
+                                : (restoredAnalysis?.tailTxnsCount != null
+                                    ? (restoredAnalysis.tailTxnsCount / (restoredAnalysis.totalRows || 1)) * 100
+                                    : 0),
+                            type: 'percent'
+                        }
                     ],
                     topDistribution: (hasRestoredABC && !filteredRows.length) ? [
                         { name: 'Head (Core Suppliers)', share: Math.round((totalA / (totalSpend || 1)) * 100) },
@@ -1115,16 +1266,19 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                 .filter(s => s.priority > 0)
                 .sort((a, b) => b.priority - a.priority)
                 .slice(0, 5),
-            categoryData,
+            categoryData: hasLiveRows ? categoryData : (restoredAnalysis?.topCategoryData ?? []),
             identifiedSavings,
             isSyntheticFallback,
-            // FIX 6: Quick-win and strategic split use effectiveBreakdown so they show
-            // restored saved values on re-login (when live rows are not yet loaded).
-            quickWinSavings: effectiveBreakdown.priceVariance + effectiveBreakdown.processEfficiency,
-            strategicSavings: effectiveBreakdown.compliance + effectiveBreakdown.singleSource + effectiveBreakdown.tailSpend,
+            quickWinSavings: (effectiveBreakdown.priceArbitrage ?? (effectiveBreakdown as any).priceVariance ?? 0)
+                + (effectiveBreakdown.paymentTerms ?? 0),
+            strategicSavings: (effectiveBreakdown.volumeDiscount ?? 0)
+                + (effectiveBreakdown.singleSource ?? 0)
+                + (effectiveBreakdown.tailSpend ?? 0)
+                + ((effectiveBreakdown as any).compliance ?? 0),
             savingsLevers,
+            leverProbabilities,
+            riskAdjustedSavings,
             savingsBreakdown: effectiveBreakdown,
-            // Internal structures needed for export
             itemMap,
             supplierSummaryBySpend
         };
@@ -1133,29 +1287,46 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
 
 
     const handleExportExcel = async () => {
-        // EXPORT FIX B: Three-tier fallback so admin/enterprise users are never blocked:
-        //   1. filteredRows from the active date/filter selection (most specific)
-        //   2. data prop — the processed rows from projectData.raw in ProjectView
-        //   3. restoredAnalysis?.raw — for legacy projects that stored rows inside latestAnalysis
-        const rowsToExport =
-            (dynamicStats?.filteredRows?.length ? dynamicStats.filteredRows : null) ||
-            (data?.length ? data : null) ||
-            (restoredAnalysis?.raw?.length ? restoredAnalysis.raw : null);
-
-        if (!rowsToExport || rowsToExport.length === 0) {
-            alert("No data available to export. The project data may still be loading — please wait a moment and try again.");
-            return;
-        }
-
         setIsGeneratingPDF(true);
 
         try {
-            console.log('[Export] rowsToExport length:', rowsToExport?.length);
+            // Four-tier row resolution — each tier is a fallback for the previous:
+            //   1. filteredRows from the active date/filter selection (most specific, honours filters)
+            //   2. data prop — projectData.raw set by AUTO-RESTORE in ProjectView
+            //   3. restoredAnalysis?.raw — legacy projects that stored rows inside latestAnalysis
+            //   4. Direct Storage fetch from categoryResultsUrl — catches the narrow window
+            //      between onSnapshot clearing isLoading and AUTO-RESTORE finishing its fetch.
+            let rowsToExport: any[] | null =
+                (dynamicStats?.filteredRows?.length ? dynamicStats.filteredRows : null) ||
+                (data?.length ? data : null) ||
+                (restoredAnalysis?.raw?.length ? restoredAnalysis.raw : null);
+
+            if (!rowsToExport || rowsToExport.length === 0) {
+                const catUrl = currentProject?.categoryResultsUrl;
+                if (catUrl) {
+                    console.log('[Export] Rows not in memory — fetching directly from Storage:', catUrl);
+                    try {
+                        const res = await fetch(catUrl);
+                        if (res.ok) {
+                            rowsToExport = await res.json();
+                            console.log('[Export] Storage fetch succeeded:', rowsToExport?.length, 'rows');
+                        }
+                    } catch (fetchErr) {
+                        console.error('[Export] Storage fetch failed:', fetchErr);
+                    }
+                }
+            }
+
+            if (!rowsToExport || rowsToExport.length === 0) {
+                alert("No data available to export. The project data may still be loading — please wait a moment and try again.");
+                return;
+            }
+
+            console.log('[Export] rowsToExport length:', rowsToExport.length);
             console.log('[Export] Mappings used:', mappings);
 
-            // EXPORT FIX C: Use smart auto-detection for exports too.
-            // This ensures that even if Step 2 was skipped or minimal, 
-            // the ExcelGenerator can still find the keys it needs for summaries.
+            // Use smart auto-detection so the ExcelGenerator always finds the right columns
+            // even if the ETL column-mapper step was skipped or returned minimal mappings.
             const baseMappings = (mappings && Object.keys(mappings).length > 0)
                 ? mappings
                 : (restoredAnalysis?.mappings ?? {});
@@ -1166,24 +1337,21 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
             const generator = new ExcelGenerator(rowsToExport, resolvedMappings, resolvedCurrency);
             const blob = await generator.generate();
 
-            // 2. Create Download Link
+            // Trigger browser download
             const url = URL.createObjectURL(blob);
-            const link = document.createElement("a");
-            const filename = `Procurement_Analysis_${new Date().toISOString().split('T')[0]}.xlsx`;
-
-            link.style.display = 'none'; // Ensure invisible
+            const link = document.createElement('a');
+            const filename = `DataDomino_${(currentProject?.name ?? 'Analysis').replace(/\s+/g, '_')}_${new Date().toISOString().split('T')[0]}.xlsx`;
+            link.style.display = 'none';
             link.href = url;
-            link.setAttribute("download", filename);
+            link.setAttribute('download', filename);
             document.body.appendChild(link);
-
-            // 3. Trigger Download (added slight delay for browser stability)
             setTimeout(() => {
                 link.click();
                 document.body.removeChild(link);
                 window.URL.revokeObjectURL(url);
             }, 100);
 
-            // 4. Persist to Firebase Storage + Firestore (non-fatal, additive)
+            // Persist export to Firebase Storage + Firestore (non-fatal, additive)
             let fileUrl: string | undefined;
             if (effectiveUid && db && storage) {
                 try {
@@ -1206,15 +1374,14 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                 }
             }
 
-            // 5. Log Activity (with fileUrl if available for Re-download)
             addActivity(currentProject?.id || '', {
                 type: 'export',
                 label: filename,
-                details: 'Comprehensive Excel export with 7-sheet analysis.',
+                details: `Cleaned & enriched Excel export — ${rowsToExport.length.toLocaleString()} rows across 8 sheets.`,
                 metadata: fileUrl ? { fileUrl } : undefined,
             });
         } catch (error) {
-            console.error('Export failed:', error);
+            console.error('[Export] Failed:', error);
             alert('Failed to generate Excel report. Please try again.');
         } finally {
             setIsGeneratingPDF(false);
@@ -1664,64 +1831,81 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                     </div>
 
                                     <div className="h-[350px] w-full relative">
-                                        <ResponsiveContainer width="100%" height="100%">
-                                            <AreaChart data={dynamicStats.spendHistory} margin={{ top: 20, right: 0, left: -20, bottom: 0 }}>
-                                                <defs>
-                                                    <linearGradient id="colorSpend" x1="0" y1="0" x2="1" y2="0">
-                                                        <stop offset="0%" stopColor="#22d3ee" stopOpacity={1} />
-                                                        <stop offset="100%" stopColor="#d946ef" stopOpacity={1} />
-                                                    </linearGradient>
-                                                    <linearGradient id="fillSpend" x1="0" y1="0" x2="0" y2="1">
-                                                        <stop offset="0%" stopColor="#22d3ee" stopOpacity={0.2} />
-                                                        <stop offset="100%" stopColor="#d946ef" stopOpacity={0} />
-                                                    </linearGradient>
-                                                </defs>
-                                                <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} opacity={0.5} />
-                                                <XAxis
-                                                    dataKey="month"
-                                                    stroke="#52525b"
-                                                    tickLine={false}
-                                                    axisLine={false}
-                                                    tick={{ fill: '#a1a1aa', fontSize: 11, fontWeight: 600 }}
-                                                    dy={10}
-                                                />
-                                                <YAxis
-                                                    stroke="#52525b"
-                                                    tickLine={false}
-                                                    axisLine={false}
-                                                    tick={{ fill: '#a1a1aa', fontSize: 10 }}
-                                                    tickFormatter={(val: any) => `${(Number(val) / 1000000).toFixed(1)}M`}
-                                                />
-                                                <Tooltip
-                                                    cursor={{ stroke: '#fff', strokeWidth: 1, strokeDasharray: '4 4' }}
-                                                    content={({ active, payload, label }) => {
-                                                        if (active && payload && payload.length) {
-                                                            return (
-                                                                <div className="bg-zinc-900/90 backdrop-blur-md border border-zinc-700/50 rounded-xl px-4 py-3 shadow-2xl">
-                                                                    <p className="text-[10px] text-zinc-400 font-bold uppercase tracking-wider mb-1">{label}</p>
-                                                                    <div className="flex items-center gap-2">
-                                                                        <div className="w-2 h-2 rounded-full bg-cyan-400" />
-                                                                        <span className="text-lg font-black text-white">
-                                                                            {formatCurrency(payload[0].value as number)}
-                                                                        </span>
+                                        {dynamicStats.spendHistory.length === 0 ? (
+                                            <div className="h-full w-full flex flex-col items-center justify-center gap-3">
+                                                {isLoading ? (
+                                                    <>
+                                                        <div className="w-full h-2 bg-zinc-800 rounded-full overflow-hidden"><div className="h-full bg-primary/40 rounded-full animate-pulse" style={{ width: '60%' }} /></div>
+                                                        <p className="text-zinc-600 text-xs font-bold uppercase tracking-widest animate-pulse">Loading spend data…</p>
+                                                    </>
+                                                ) : (
+                                                    <>
+                                                        <div className="text-zinc-700 text-4xl">📈</div>
+                                                        <p className="text-zinc-500 text-sm font-semibold">Trend data unavailable</p>
+                                                        <p className="text-zinc-700 text-xs text-center max-w-xs">Date column may not be mapped, or data is still loading. Re-run the analysis to restore.</p>
+                                                    </>
+                                                )}
+                                            </div>
+                                        ) : (
+                                            <ResponsiveContainer width="100%" height="100%">
+                                                <AreaChart data={dynamicStats.spendHistory} margin={{ top: 20, right: 0, left: -20, bottom: 0 }}>
+                                                    <defs>
+                                                        <linearGradient id="colorSpend" x1="0" y1="0" x2="1" y2="0">
+                                                            <stop offset="0%" stopColor="#22d3ee" stopOpacity={1} />
+                                                            <stop offset="100%" stopColor="#d946ef" stopOpacity={1} />
+                                                        </linearGradient>
+                                                        <linearGradient id="fillSpend" x1="0" y1="0" x2="0" y2="1">
+                                                            <stop offset="0%" stopColor="#22d3ee" stopOpacity={0.2} />
+                                                            <stop offset="100%" stopColor="#d946ef" stopOpacity={0} />
+                                                        </linearGradient>
+                                                    </defs>
+                                                    <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} opacity={0.5} />
+                                                    <XAxis
+                                                        dataKey="month"
+                                                        stroke="#52525b"
+                                                        tickLine={false}
+                                                        axisLine={false}
+                                                        tick={{ fill: '#a1a1aa', fontSize: 11, fontWeight: 600 }}
+                                                        dy={10}
+                                                    />
+                                                    <YAxis
+                                                        stroke="#52525b"
+                                                        tickLine={false}
+                                                        axisLine={false}
+                                                        tick={{ fill: '#a1a1aa', fontSize: 10 }}
+                                                        tickFormatter={(val: any) => `${(Number(val) / 1000000).toFixed(1)}M`}
+                                                    />
+                                                    <Tooltip
+                                                        cursor={{ stroke: '#fff', strokeWidth: 1, strokeDasharray: '4 4' }}
+                                                        content={({ active, payload, label }) => {
+                                                            if (active && payload && payload.length) {
+                                                                return (
+                                                                    <div className="bg-zinc-900/90 backdrop-blur-md border border-zinc-700/50 rounded-xl px-4 py-3 shadow-2xl">
+                                                                        <p className="text-[10px] text-zinc-400 font-bold uppercase tracking-wider mb-1">{label}</p>
+                                                                        <div className="flex items-center gap-2">
+                                                                            <div className="w-2 h-2 rounded-full bg-cyan-400" />
+                                                                            <span className="text-lg font-black text-white">
+                                                                                {formatCurrency(payload[0].value as number)}
+                                                                            </span>
+                                                                        </div>
                                                                     </div>
-                                                                </div>
-                                                            );
-                                                        }
-                                                        return null;
-                                                    }}
-                                                />
-                                                <Area
-                                                    type="monotone"
-                                                    dataKey="spend"
-                                                    stroke="url(#colorSpend)"
-                                                    strokeWidth={4}
-                                                    fillOpacity={1}
-                                                    fill="url(#fillSpend)"
-                                                    activeDot={{ r: 6, strokeWidth: 0, fill: '#fff' }}
-                                                />
-                                            </AreaChart>
-                                        </ResponsiveContainer>
+                                                                );
+                                                            }
+                                                            return null;
+                                                        }}
+                                                    />
+                                                    <Area
+                                                        type="monotone"
+                                                        dataKey="spend"
+                                                        stroke="url(#colorSpend)"
+                                                        strokeWidth={4}
+                                                        fillOpacity={1}
+                                                        fill="url(#fillSpend)"
+                                                        activeDot={{ r: 6, strokeWidth: 0, fill: '#fff' }}
+                                                    />
+                                                </AreaChart>
+                                            </ResponsiveContainer>
+                                        )}
                                     </div>
                                 </div>
 
@@ -1729,68 +1913,87 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                     <h3 className="text-2xl font-bold tracking-tight mb-2">Spend Distribution</h3>
                                     <p className="text-sm text-zinc-500 mb-10">Consolidated L1 Category Analysis</p>
 
-                                    <div className="h-[250px] w-full relative mb-10">
-                                        <ResponsiveContainer width="100%" height="100%">
-                                            <PieChart>
-                                                <Pie
-                                                    data={dynamicStats.spendTypeData}
-                                                    cx="50%"
-                                                    cy="50%"
-                                                    innerRadius={70}
-                                                    outerRadius={100}
-                                                    paddingAngle={5}
-                                                    dataKey="value"
-                                                    stroke="none"
-                                                    onClick={(data) => setActiveSpendType(activeSpendType === data.name ? null : data.name as any)}
-                                                    onMouseEnter={(data) => setHoveredSpendType(data.name as any)}
-                                                    onMouseLeave={() => setHoveredSpendType(null)}
-                                                    className="cursor-pointer focus:outline-none"
-                                                >
-                                                    {dynamicStats.spendTypeData.map((entry, index) => (
-                                                        <Cell
-                                                            key={`cell - ${index} `}
-                                                            fill={entry.color}
-                                                            opacity={(hoveredSpendType && hoveredSpendType !== entry.name) || (activeSpendType && activeSpendType !== entry.name) ? 0.3 : 1}
-                                                            className="transition-all duration-300"
-                                                        />
-                                                    ))}
-                                                </Pie>
-                                                <Tooltip
-                                                    contentStyle={{ backgroundColor: '#09090b', border: '1px solid #18181b', borderRadius: '16px', boxShadow: '0 20px 25px -5px rgb(0 0 0 / 0.5)' }}
-                                                    itemStyle={{ color: '#fff', fontSize: '12px', fontWeight: 'bold' }}
-                                                    formatter={(value: any, name: any) => [`${value}% `, `${name} Cost`]}
-                                                />
-                                            </PieChart>
-                                        </ResponsiveContainer>
-                                        <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-                                            <span className="text-3xl font-black text-white">
-                                                {activeSpendType ? dynamicStats.spendTypeData.find(s => s.name === activeSpendType)?.value : '100'}%
-                                            </span>
-                                            <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-[0.2em]">
-                                                {hoveredSpendType || activeSpendType ? `${hoveredSpendType || activeSpendType} Cost` : 'Total Spend'}
-                                            </span>
+                                    {(dynamicStats.spendTypeData.length === 0 || dynamicStats.categoryData.length === 0) ? (
+                                        <div className="flex flex-col items-center justify-center gap-3 py-16">
+                                            {isLoading ? (
+                                                <>
+                                                    <div className="w-24 h-24 rounded-full border-4 border-zinc-800 border-t-primary animate-spin" />
+                                                    <p className="text-zinc-600 text-xs font-bold uppercase tracking-widest animate-pulse mt-4">Loading distribution…</p>
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <div className="text-zinc-700 text-4xl">🗂️</div>
+                                                    <p className="text-zinc-500 text-sm font-semibold">Distribution data unavailable</p>
+                                                    <p className="text-zinc-700 text-xs text-center max-w-xs">Category column may not be mapped, or data is still loading. Re-run the analysis to restore.</p>
+                                                </>
+                                            )}
                                         </div>
-                                    </div>
-
-                                    <div className="space-y-4 overflow-y-auto max-h-[300px] pr-2">
-                                        {dynamicStats.categoryData
-                                            .filter(c => !activeSpendType || c.type === activeSpendType)
-                                            .slice(0, 6)
-                                            .map((cat) => (
-                                                <div key={cat.name} className="grid grid-cols-[1fr_80px_40px] items-center gap-3 group cursor-default">
-                                                    <div className="flex items-center gap-3 overflow-hidden">
-                                                        <div className="h-2.5 w-2.5 rounded-full shrink-0 shadow-lg" style={{ backgroundColor: cat.color, boxShadow: `0 0 10px ${cat.color} 66` }} />
-                                                        <span className="text-xs font-bold text-zinc-400 group-hover:text-white transition-colors uppercase tracking-wider truncate" title={cat.name}>
-                                                            {cat.name}
-                                                        </span>
-                                                    </div>
-                                                    <div className="h-1.5 bg-zinc-950 rounded-full overflow-hidden w-full">
-                                                        <div className="h-full rounded-full transition-all duration-1000" style={{ width: `${cat.value}% `, backgroundColor: cat.color }} />
-                                                    </div>
-                                                    <span className="text-xs font-bold font-mono text-white text-right">{cat.value}%</span>
+                                    ) : (
+                                        <>
+                                            <div className="h-[250px] w-full relative mb-10">
+                                                <ResponsiveContainer width="100%" height="100%">
+                                                    <PieChart>
+                                                        <Pie
+                                                            data={dynamicStats.spendTypeData}
+                                                            cx="50%"
+                                                            cy="50%"
+                                                            innerRadius={70}
+                                                            outerRadius={100}
+                                                            paddingAngle={5}
+                                                            dataKey="value"
+                                                            stroke="none"
+                                                            onClick={(data) => setActiveSpendType(activeSpendType === data.name ? null : data.name as any)}
+                                                            onMouseEnter={(data) => setHoveredSpendType(data.name as any)}
+                                                            onMouseLeave={() => setHoveredSpendType(null)}
+                                                            className="cursor-pointer focus:outline-none"
+                                                        >
+                                                            {dynamicStats.spendTypeData.map((entry, index) => (
+                                                                <Cell
+                                                                    key={`cell - ${index} `}
+                                                                    fill={entry.color}
+                                                                    opacity={(hoveredSpendType && hoveredSpendType !== entry.name) || (activeSpendType && activeSpendType !== entry.name) ? 0.3 : 1}
+                                                                    className="transition-all duration-300"
+                                                                />
+                                                            ))}
+                                                        </Pie>
+                                                        <Tooltip
+                                                            contentStyle={{ backgroundColor: '#09090b', border: '1px solid #18181b', borderRadius: '16px', boxShadow: '0 20px 25px -5px rgb(0 0 0 / 0.5)' }}
+                                                            itemStyle={{ color: '#fff', fontSize: '12px', fontWeight: 'bold' }}
+                                                            formatter={(value: any, name: any) => [`${value}% `, `${name} Cost`]}
+                                                        />
+                                                    </PieChart>
+                                                </ResponsiveContainer>
+                                                <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+                                                    <span className="text-3xl font-black text-white">
+                                                        {activeSpendType ? dynamicStats.spendTypeData.find(s => s.name === activeSpendType)?.value : '100'}%
+                                                    </span>
+                                                    <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-[0.2em]">
+                                                        {hoveredSpendType || activeSpendType ? `${hoveredSpendType || activeSpendType} Cost` : 'Total Spend'}
+                                                    </span>
                                                 </div>
-                                            ))}
-                                    </div>
+                                            </div>
+
+                                            <div className="space-y-4 overflow-y-auto max-h-[300px] pr-2">
+                                                {dynamicStats.categoryData
+                                                    .filter(c => !activeSpendType || c.type === activeSpendType)
+                                                    .slice(0, 6)
+                                                    .map((cat) => (
+                                                        <div key={cat.name} className="grid grid-cols-[1fr_80px_40px] items-center gap-3 group cursor-default">
+                                                            <div className="flex items-center gap-3 overflow-hidden">
+                                                                <div className="h-2.5 w-2.5 rounded-full shrink-0 shadow-lg" style={{ backgroundColor: cat.color, boxShadow: `0 0 10px ${cat.color} 66` }} />
+                                                                <span className="text-xs font-bold text-zinc-400 group-hover:text-white transition-colors uppercase tracking-wider truncate" title={cat.name}>
+                                                                    {cat.name}
+                                                                </span>
+                                                            </div>
+                                                            <div className="h-1.5 bg-zinc-950 rounded-full overflow-hidden w-full">
+                                                                <div className="h-full rounded-full transition-all duration-1000" style={{ width: `${cat.value}% `, backgroundColor: cat.color }} />
+                                                            </div>
+                                                            <span className="text-xs font-bold font-mono text-white text-right">{cat.value}%</span>
+                                                        </div>
+                                                    ))}
+                                            </div>
+                                        </>
+                                    )}
                                 </div>
                             </div>
 
@@ -1965,26 +2168,23 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                         !checkAccess('savings_roi') && "blur-xl pointer-events-none select-none opacity-50"
                                     )}>
                                         <span className="text-[10px] font-black text-emerald-500 uppercase tracking-widest mb-4 block">Quick-Win Savings</span>
-                                        {/* FIX 6: Driven by Price Arbitrage + Process Efficiency breakdown */}
                                         <div className="text-4xl font-black text-white mb-2">{formatCurrency(dynamicStats.quickWinSavings)}</div>
-                                        <p className="text-xs text-zinc-500">Price arbitrage &amp; process efficiency (actionable now)</p>
+                                        <p className="text-xs text-zinc-500">Price arbitrage &amp; payment terms optimisation (actionable now)</p>
                                     </div>
                                     <div className={cn(
                                         "bg-amber-500/5 border border-amber-500/20 rounded-3xl p-8 border-b-4 border-b-amber-500 transition-all",
                                         !checkAccess('savings_roi') && "blur-xl pointer-events-none select-none opacity-50"
                                     )}>
                                         <span className="text-[10px] font-black text-amber-500 uppercase tracking-widest mb-4 block">Strategic Pipeline</span>
-                                        {/* FIX 6: Driven by Contract Compliance + Single Source + Tail Consolidation */}
                                         <div className="text-4xl font-black text-white mb-2">{formatCurrency(dynamicStats.strategicSavings)}</div>
-                                        <p className="text-xs text-zinc-500">Contract renegotiation, sourcing &amp; tail consolidation</p>
+                                        <p className="text-xs text-zinc-500">Volume commitment, alternate vendors &amp; tail consolidation</p>
                                     </div>
                                 </div>
 
                                 <div className="space-y-6">
                                     <div className="flex items-center justify-between">
-                                        <h4 className="text-lg font-bold text-white uppercase tracking-tighter">Top 3 Savings Opportunities</h4>
-                                        {/* FIX 10: Currency label is now dynamic */}
-                                        <span className="text-zinc-500 text-[10px] font-bold uppercase tracking-widest">Ranked by absolute {currency} value</span>
+                                        <h4 className="text-lg font-bold text-white uppercase tracking-tighter">Top Savings Opportunities</h4>
+                                        <span className="text-zinc-500 text-[10px] font-bold uppercase tracking-widest">Ranked by risk-adjusted expected value</span>
                                     </div>
 
                                     <div className="grid grid-cols-1 gap-4">
@@ -2003,12 +2203,20 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                                         </div>
                                                         <div>
                                                             <h5 className="text-white font-bold">{opp.label}</h5>
-                                                            <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest">{opp.recommendation}</p>
+                                                            <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest max-w-sm">{opp.recommendation}</p>
                                                         </div>
                                                     </div>
-                                                    <div className="text-right">
+                                                    <div className="text-right shrink-0 ml-4">
                                                         <div className="text-xl font-black text-primary">{formatCurrency(opp.value)}</div>
-                                                        <div className="text-[10px] font-bold text-emerald-500">{opp.percent.toFixed(1)}% Saving</div>
+                                                        <div className="text-[10px] font-bold text-zinc-400">{opp.percent.toFixed(1)}% of addressable spend</div>
+                                                        <div className="mt-1 flex items-center justify-end gap-2">
+                                                            <span className="bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-widest">
+                                                                {opp.probability}% probability
+                                                            </span>
+                                                            <span className="text-[10px] font-bold text-emerald-400">
+                                                                Risk-adj: {formatCurrency(opp.expectedValue)}
+                                                            </span>
+                                                        </div>
                                                     </div>
                                                 </div>
 

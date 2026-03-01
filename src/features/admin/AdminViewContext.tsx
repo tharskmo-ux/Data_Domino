@@ -4,7 +4,7 @@ interface ViewingClient {
     uid: string;
     email: string;
     displayName: string;
-    role: 'admin' | 'enterprise' | 'trial';
+    role: 'admin' | 'enterprise' | 'trial' | 'revoked';
     subType: 'FREE' | 'ENTERPRISE';
 }
 

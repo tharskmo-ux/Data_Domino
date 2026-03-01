@@ -464,15 +464,21 @@ const DashboardPage = () => {
                                                                 }`}>
                                                                 {project.status || 'Active'}
                                                             </div>
-                                                            <button
-                                                                    onClick={(e) => {
-                                                                        e.stopPropagation();
-                                                                        deleteProject(project.id);
-                                                                    }}
-                                                                    className="p-2 text-zinc-600 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-colors"
-                                                                >
-                                                                    <Trash2 className="h-4 w-4" />
-                                                                </button>
+                                                            {(() => {
+                                                                const isCompleted = project.status === 'data_quality_complete' || project.status === 'completed' || Number(project.currentStep) >= 6;
+                                                                const canDelete = isAdmin || effectiveRole !== 'trial' || !isCompleted;
+                                                                return canDelete ? (
+                                                                    <button
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation();
+                                                                            deleteProject(project.id);
+                                                                        }}
+                                                                        className="p-2 text-zinc-600 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-colors"
+                                                                    >
+                                                                        <Trash2 className="h-4 w-4" />
+                                                                    </button>
+                                                                ) : null;
+                                                            })()}
                                                         </div>
                                                     </div>
 

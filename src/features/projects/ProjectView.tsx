@@ -446,7 +446,12 @@ const ProjectView: React.FC = () => {
     // This overrides the 100-row Firestore preview (rawGrid) that onSnapshot may have loaded.
     useEffect(() => {
         const catUrl = currentProject?.categoryResultsUrl;
-        const projectIsComplete = currentProject?.status === 'data_quality_complete' || currentProject?.status === 'completed';
+        // Include every terminal status — 'categorization_complete' is the status that
+        // handleCategoryComplete writes, so it must be here or AUTO-RESTORE never fires.
+        const projectIsComplete =
+            currentProject?.status === 'categorization_complete' ||
+            currentProject?.status === 'data_quality_complete' ||
+            currentProject?.status === 'completed';
         const la = currentProject?.latestAnalysis;
 
         // Only run when the project is complete and we have finished the initial load
@@ -805,204 +810,396 @@ const ProjectView: React.FC = () => {
 
         if (effectiveUid && db && currentProject) {
             (async () => {
-                try {
-                    // Phase 9 PERF-03 FIX: Persist large JSON to Storage instead of Firestore doc
-                    let categoryResultsUrl = '';
-                    if (storage) {
-                        const rawJson = JSON.stringify(updatedData);
-                        const rawRef = ref(storage, `uploads/${effectiveUid}/${currentProject.id}/category_results.json`);
-                        await uploadString(rawRef, rawJson, 'raw');
-                        categoryResultsUrl = await getDownloadURL(rawRef);
+                // ── Analytics Calculation (pure JS — no I/O, no try/catch needed) ──────
+                const amounts = updatedData.map(row => {
+                    if (amountCol && row[amountCol]) {
+                        const s = String(row[amountCol]).replace(/[^0-9.-]+/g, "");
+                        return parseFloat(s) || 0;
                     }
+                    return 0;
+                });
+                const totalSpendVal = amounts.reduce((acc, val) => acc + val, 0);
+                const avgTransactionValue = totalSpendVal / updatedData.length;
+                const maxTransaction = Math.max(...amounts, 0);
 
+                const supplierSpendMap: Record<string, number> = {};
+                updatedData.forEach((row, i) => {
+                    const s = String(row[supplierCol] || 'Unknown');
+                    supplierSpendMap[s] = (supplierSpendMap[s] || 0) + amounts[i];
+                });
 
-                    // Analytics Calculation
-                    const amounts = updatedData.map(row => {
-                        if (amountCol && row[amountCol]) {
-                            const s = String(row[amountCol]).replace(/[^0-9.-]+/g, "");
-                            return parseFloat(s) || 0;
-                        }
-                        return 0;
-                    });
-                    const totalSpendVal = amounts.reduce((acc, val) => acc + val, 0);
-                    const avgTransactionValue = totalSpendVal / updatedData.length;
-                    const maxTransaction = Math.max(...amounts, 0);
+                const sortedSuppliers = Object.entries(supplierSpendMap).sort((a, b) => b[1] - a[1]);
+                const topVendors = sortedSuppliers.slice(0, 5).map(([name]) => name);
+                const topVendorSpend = sortedSuppliers.slice(0, 5).reduce((acc, [_, spend]) => acc + spend, 0);
 
-                    const supplierSpendMap: Record<string, number> = {};
-                    updatedData.forEach((row, i) => {
-                        const s = String(row[supplierCol] || 'Unknown');
-                        supplierSpendMap[s] = (supplierSpendMap[s] || 0) + amounts[i];
-                    });
+                // ABC: compute as *spend buckets* (not transaction counts) so the
+                // dashboard can display them directly as currency / percentage of spend.
+                const sortedSpend = [...amounts].sort((a, b) => b - a);
+                let currentCumul = 0;
+                let abcA = 0, abcB = 0, abcC = 0; // spend totals per tier
+                sortedSpend.forEach(val => {
+                    currentCumul += val;
+                    if (currentCumul <= totalSpendVal * 0.7) abcA += val;
+                    else if (currentCumul <= totalSpendVal * 0.9) abcB += val;
+                    else abcC += val;
+                });
 
-                    const sortedSuppliers = Object.entries(supplierSpendMap).sort((a, b) => b[1] - a[1]);
-                    const topVendors = sortedSuppliers.slice(0, 5).map(([name]) => name);
-                    const topVendorSpend = sortedSuppliers.slice(0, 5).reduce((acc, [_, spend]) => acc + spend, 0);
+                // ── Savings v2: Pure Pricing Levers (mirrors AnalyticsDashboard logic) ──
+                // Five data-driven levers; each row assigned to exactly one (highest priority wins).
+                const amountColSave = projectData.mappings['amount'];
+                const contractColSave = projectData.mappings['contract_ref'];
+                const ptColSave = projectData.mappings['payment_terms'];
+                const itemColSave = projectData.mappings['item_description'];
+                const unitPriceColSave = projectData.mappings['unit_price'];
 
-                    // ABC: compute as *spend buckets* (not transaction counts) so the
-                    // dashboard can display them directly as currency / percentage of spend.
-                    const sortedSpend = [...amounts].sort((a, b) => b - a);
-                    let currentCumul = 0;
-                    let abcA = 0, abcB = 0, abcC = 0; // spend totals per tier
-                    sortedSpend.forEach(val => {
-                        currentCumul += val;
-                        if (currentCumul <= totalSpendVal * 0.7) abcA += val;
-                        else if (currentCumul <= totalSpendVal * 0.9) abcB += val;
-                        else abcC += val;
-                    });
+                // ── Global pre-computations ───────────────────────────────────────────
+                let contractedSpendSave = 0;
+                let ptRiskSpendSave = 0;
+                let totalIdentifiedSavingsSave = 0;
+                let priceArbitrageSave = 0;
+                let paymentTermsSave = 0;
+                let volumeDiscountSave = 0;
+                let singleSourceSave = 0;
+                let tailSpendSave = 0;
 
-                    // ── Compute savings signals from the full dataset ──────────────────────
-                    // These mirror the AnalyticsDashboard dynamicStats logic so saved values
-                    // match what was shown to the user when the analysis first completed.
-                    const amountColSave = projectData.mappings['amount'];
-                    const contractColSave = projectData.mappings['contract_ref'];
-                    const ptColSave = projectData.mappings['payment_terms'];
-                    const itemColSave = projectData.mappings['item_description'];
-
-                    let contractedSpendSave = 0;
-                    let ptRiskSpendSave = 0;
-                    let totalIdentifiedSavingsSave = 0;
-                    let priceVarianceSave = 0;
-                    let complianceSave = 0;
-                    let singleSourceSave = 0;
-                    let tailSpendSave = 0;
-                    let processEffSave = 0;
-                    const isHighValueCurrencySave = /^(USD|GBP|EUR|AUD|CAD|CHF|SGD)$/i.test(projectData.currency || 'INR');
-                    const lvThreshold = isHighValueCurrencySave ? 100 : 5000;
-                    const peFixedSave = isHighValueCurrencySave ? 50 : 500;
-
-                    // Global supplier spend for tail detection
-                    const gSupplierSpend: Record<string, number> = {};
-                    updatedData.forEach(r => {
-                        const s = String(r[supplierCol] || '');
-                        const a = parseFloat(String(r[amountColSave] || '0').replace(/[^0-9.-]+/g, '')) || 0;
+                // Supplier spend + transaction count (for Tail and Volume Discount)
+                const gSupplierSpend: Record<string, number> = {};
+                const gSupplierTxCount: Record<string, number> = {};
+                updatedData.forEach(r => {
+                    const s = String(r[supplierCol] || '');
+                    const a = parseFloat(String(r[amountColSave] || '0').replace(/[^0-9.-]+/g, '')) || 0;
+                    if (s) {
                         gSupplierSpend[s] = (gSupplierSpend[s] || 0) + a;
-                    });
-                    const gTotal = Object.values(gSupplierSpend).reduce((x, y) => x + y, 0);
-                    const gTailThresh = gTotal * 0.2;
-                    const gSorted = Object.entries(gSupplierSpend).sort((a, b) => a[1] - b[1]);
-                    const gTailSet = new Set<string>();
-                    let gCum = 0;
-                    for (const [s, a] of gSorted) {
-                        if (gCum + a <= gTailThresh) { gTailSet.add(s); gCum += a; } else break;
+                        gSupplierTxCount[s] = (gSupplierTxCount[s] || 0) + 1;
+                    }
+                });
+
+                // --- Intelligent Multi-lens Tail Spend Logic (Harmonized) ---
+                // Supplier is "Tail" if beyond 80% Pareto AND (Spend < 25L OR Share < 0.5%) AND NOT protected
+                const gTotal = Object.values(gSupplierSpend).reduce((x, y) => x + y, 0);
+                const tailStartThresh = gTotal * 0.80;
+                const gSortedDesc = Object.entries(gSupplierSpend).sort((a, b) => b[1] - a[1]);
+                const gTailSuppliersSet = new Set<string>();
+                let runningCumSpend = 0;
+
+                gSortedDesc.forEach(([sup, spend]) => {
+                    const prevCumSpend = runningCumSpend;
+                    runningCumSpend += spend;
+                    const share = (spend / (gTotal || 1)) * 100;
+
+                    // Categories for this supplier (to check for "Protected Tail")
+                    const sCat = updatedData.find(r => String(r[supplierCol] || '') === sup)?.[projectData.mappings['category_l1'] || 'category'] || '';
+                    const isProtected = /safety|critical|spare|regulatory|itar|strategic|contract/i.test(sup) ||
+                        /safety|critical|compliance|regulatory/i.test(String(sCat));
+
+                    const isLowShare = share < 0.5;
+                    const isLowAbsolute = spend < 2500000;
+
+                    if (prevCumSpend >= tailStartThresh && (isLowShare || isLowAbsolute) && !isProtected) {
+                        gTailSuppliersSet.add(sup);
+                    }
+                });
+
+                // Volume Discount qualifying suppliers: ≥1% of spend AND >5 transactions
+                const gVolDiscMinSpend = gTotal * 0.01;
+                const gVolDiscSuppliers = new Set<string>();
+                Object.entries(gSupplierSpend).forEach(([sup, spend]) => {
+                    if (spend >= gVolDiscMinSpend && (gSupplierTxCount[sup] || 0) > 5) gVolDiscSuppliers.add(sup);
+                });
+
+                // Item-level min price and supplier count (for Price Arbitrage + Single Source)
+                const gItemStats: Record<string, { minPrice: number, supplierCount: number, suppliers: Set<string> }> = {};
+                updatedData.forEach(r => {
+                    const item = String(r[itemColSave] || '').trim();
+                    if (!item) return;
+                    const up = parseFloat(String(r[unitPriceColSave] || '0').replace(/[^0-9.-]+/g, '')) || 0;
+                    const sup = String(r[supplierCol] || '');
+                    if (!gItemStats[item]) gItemStats[item] = { minPrice: up || Infinity, supplierCount: 0, suppliers: new Set() };
+                    gItemStats[item].suppliers.add(sup);
+                    if (up > 0 && up < gItemStats[item].minPrice) gItemStats[item].minPrice = up;
+                });
+                Object.values(gItemStats).forEach(s => {
+                    s.supplierCount = s.suppliers.size;
+                    if (s.minPrice === Infinity) s.minPrice = 0;
+                });
+
+                // Helper for contracted-spend KPI (unchanged — not a savings lever)
+                const isContractedRefSave = (val: string): boolean => {
+                    if (!val || /^[-–—/\s]*$/.test(val)) return false;
+                    if (/^(n\/?a|none|nil|unverified|not available|no contract|tbd|pending|--)$/i.test(val.trim())) return false;
+                    return /contracted|active|valid|yes|\bY\b|PO-|CT-|CON-|AGR-|\d{4,}/i.test(val);
+                };
+
+                updatedData.forEach(r => {
+                    const amount = parseFloat(String(r[amountColSave] || '0').replace(/[^0-9.-]+/g, '')) || 0;
+                    const supplier = String(r[supplierCol] || '');
+                    const item = String(r[itemColSave] || '').trim();
+                    const up = parseFloat(String(r[unitPriceColSave] || '0').replace(/[^0-9.-]+/g, '')) || 0;
+                    // qty column removed — implied quantity derived from amount/unitPrice in L1
+                    const contractRaw = String(r[contractColSave] || r['Contract_Status'] || '').trim();
+                    const ptLower = String(r[ptColSave] || '').toLowerCase();
+
+                    // Stats for KPI cards (not savings levers)
+                    if (isContractedRefSave(contractRaw)) contractedSpendSave += amount;
+                    if (/immediate|cash|net 7|net0|net.?7|pickup|advance|prepay/i.test(ptLower)) ptRiskSpendSave += amount;
+
+                    let rowSav = 0;
+
+                    // ── L1: Multi-Vendor Price Arbitrage (Priority 1) ────────────────
+                    if (item && gItemStats[item]?.supplierCount > 1 && gItemStats[item].minPrice > 0 && up > gItemStats[item].minPrice && amount > 0) {
+                        const bestPrice = gItemStats[item].minPrice;
+                        // Safety: Ignore tiny unit prices (possible noise) to prevent impliedQty explosion
+                        if (up > 0.001) {
+                            const impliedQty = amount / up;
+                            const rawSavings = (up - bestPrice) * impliedQty * 0.85;
+                            // Strict Cap: L1 is mathematically at most 85% of amount
+                            rowSav = Math.min(rawSavings, amount * 0.85);
+                            priceArbitrageSave += rowSav;
+                            totalIdentifiedSavingsSave += rowSav;
+                        }
                     }
 
-                    // Global item stats for price arbitrage
-                    const gItemStats: Record<string, { minPrice: number, supplierCount: number, suppliers: Set<string> }> = {};
-                    const unitPriceColSave = projectData.mappings['unit_price'];
-                    updatedData.forEach(r => {
-                        const item = String(r[itemColSave] || '').trim();
-                        if (!item) return;
-                        const up = parseFloat(String(r[unitPriceColSave] || '0').replace(/[^0-9.-]+/g, '')) || 0;
-                        const sup = String(r[supplierCol] || '');
-                        if (!gItemStats[item]) gItemStats[item] = { minPrice: up || Infinity, supplierCount: 0, suppliers: new Set() };
-                        gItemStats[item].suppliers.add(sup);
-                        if (up > 0 && up < gItemStats[item].minPrice) gItemStats[item].minPrice = up;
+                    // ── L2: Payment Terms Optimisation (Priority 2) ──────────────────
+                    if (rowSav === 0 && ptColSave) {
+                        let ptRate = 0;
+                        if (/\b(cash|advance|prepay|upfront|immediate|cod|on.?delivery|up.?front)\b/.test(ptLower)) ptRate = 0.025;
+                        else if (/\bnet\s*0\b|net0|net.?7\b|net.?10\b|net.?14\b/.test(ptLower)) ptRate = 0.015;
+                        if (ptRate > 0) {
+                            rowSav = amount * ptRate;
+                            paymentTermsSave += rowSav;
+                            totalIdentifiedSavingsSave += rowSav;
+                        }
+                    }
+
+                    // ── L3: Volume Commitment Discount (Priority 3) ──────────────────
+                    if (rowSav === 0 && supplier && gVolDiscSuppliers.has(supplier)) {
+                        rowSav = amount * 0.03;
+                        volumeDiscountSave += rowSav;
+                        totalIdentifiedSavingsSave += rowSav;
+                    }
+
+                    // ── L4: Alternate Vendor Introduction (Priority 4) ───────────────
+                    if (rowSav === 0 && item && gItemStats[item]?.supplierCount === 1) {
+                        rowSav = amount * 0.05;
+                        singleSourceSave += rowSav;
+                        totalIdentifiedSavingsSave += rowSav;
+                    }
+
+                    // ── L5: Tail Spend Consolidation (Priority 5) ─────────────────────
+                    if (rowSav === 0 && gTailSuppliersSet.has(supplier)) {
+                        rowSav = amount * 0.06;
+                        tailSpendSave += rowSav;
+                        totalIdentifiedSavingsSave += rowSav;
+                    }
+                });
+
+                // Global safety cap: total savings can never exceed total spend
+                totalIdentifiedSavingsSave = Math.floor(Math.min(totalIdentifiedSavingsSave, totalSpendVal));
+
+                const contractedPctSave = totalSpendVal > 0 ? (contractedSpendSave / totalSpendVal) * 100 : 0;
+                const ptRiskPctSave = totalSpendVal > 0 ? (ptRiskSpendSave / totalSpendVal) * 100 : 0;
+
+                // Item-level sourcing signals
+                const iMapSave: Record<string, { spend: number, suppliers: Set<string> }> = {};
+                updatedData.forEach(r => {
+                    const item = String(r[itemColSave] || '').trim();
+                    if (!item) return;
+                    const sup = String(r[supplierCol] || 'Unknown');
+                    const amt = parseFloat(String(r[amountColSave] || '0').replace(/[^0-9.-]+/g, '')) || 0;
+                    if (!iMapSave[item]) iMapSave[item] = { spend: 0, suppliers: new Set() };
+                    iMapSave[item].spend += amt;
+                    iMapSave[item].suppliers.add(sup);
+                });
+                const singleSrcSpendSave = Object.values(iMapSave).filter(i => i.suppliers.size === 1).reduce((a, i) => a + i.spend, 0);
+                const singleSourcingPctSave = totalSpendVal > 0 ? (singleSrcSpendSave / totalSpendVal) * 100 : 0;
+
+                // Tail spend % for lever signals
+                const tailSpendAmtSave = Object.entries(gSupplierSpend).filter(([s]) => gTailSuppliersSet.has(s)).reduce((a, [, v]) => a + v, 0);
+                const tailSpendPctSave = gTotal > 0 ? (tailSpendAmtSave / gTotal) * 100 : 0;
+
+                const dateCol = projectData.mappings['date'];
+                let dateRangeStart = '';
+                let dateRangeEnd = '';
+                if (dateCol) {
+                    const dates = updatedData.map(row => row[dateCol]).filter(Boolean).map(d => new Date(d)).filter(d => !isNaN(d.getTime()));
+                    if (dates.length > 0) {
+                        // Phase 9 MEDIUM-02 FIX: Removed unguarded spread operator Math.max(...dates)
+                        dateRangeStart = new Date(dates.reduce((min, d) => Math.min(min, d.getTime()), dates[0].getTime())).toISOString();
+                        dateRangeEnd = new Date(dates.reduce((max, d) => Math.max(max, d.getTime()), dates[0].getTime())).toISOString();
+                    }
+                }
+
+                const rowHashes = updatedData.map(row => `${row[supplierCol]}|${row[amountCol]}|${row[dateCol]}`);
+                const hashCounts: Record<string, number> = {};
+                rowHashes.forEach(h => hashCounts[h] = (hashCounts[h] || 0) + 1);
+                let duplicateCount = 0;
+                let duplicateValue = 0;
+                Object.entries(hashCounts).forEach(([hash, count]) => {
+                    if (count > 1) {
+                        duplicateCount += (count - 1);
+                        const amountStr = hash.split('|')[1].replace(/[^0-9.-]+/g, "");
+                        duplicateValue += (parseFloat(amountStr) || 0) * (count - 1);
+                    }
+                });
+
+                // BU, Location, and Avg PO — computed for card retention on revisit
+                // (AnalyticsDashboard reads these from restoredAnalysis when live rows aren't loaded)
+                const buColSave = projectData.mappings['business_unit'] || projectData.mappings['plant'] || '';
+                const locColSave = projectData.mappings['location'] || projectData.mappings['plant'] || '';
+                // Use spend maps (not boolean flags) so we can reconstruct topDistribution bars on revisit
+                const buSpendSave: Record<string, number> = {};
+                const locSpendSave: Record<string, number> = {};
+                const poSetSave = new Set<string>();
+                updatedData.forEach(r => {
+                    const bu = String(r[buColSave] || 'Corporate');
+                    const loc = String(r[locColSave] || 'Headquarters');
+                    const amt = parseFloat(String(r[amountColSave] || '0').replace(/[^0-9.-]+/g, '')) || 0;
+                    const po = String(r[projectData.mappings['po_number']] || r[projectData.mappings['invoice_number']] || '').trim();
+                    buSpendSave[bu] = (buSpendSave[bu] || 0) + amt;
+                    locSpendSave[loc] = (locSpendSave[loc] || 0) + amt;
+                    if (po) poSetSave.add(po);
+                });
+                const buCount = Object.keys(buSpendSave).length;
+                const locationCount = Object.keys(locSpendSave).length;
+                const avgPOValueSave = poSetSave.size > 0 ? totalSpendVal / poSetSave.size : totalSpendVal;
+
+                // FY / YTD / LY spend — for Total Spend card sub-metrics on revisit
+                const getFYSave = (d: Date) => d.getMonth() >= 3 ? d.getFullYear() : d.getFullYear() - 1;
+                const currentFYSave = getFYSave(new Date());
+                let fySpendSave = 0, ytdSpendSave = 0, lySpendSave = 0;
+                const nowSave = new Date();
+                if (dateCol) {
+                    updatedData.forEach((r, i) => {
+                        const d = r[dateCol] ? new Date(String(r[dateCol])) : null;
+                        if (!d || isNaN(d.getTime())) return;
+                        const fy = getFYSave(d);
+                        const amt = amounts[i] || 0;
+                        if (fy === currentFYSave) fySpendSave += amt;
+                        if (fy === currentFYSave && d <= nowSave) ytdSpendSave += amt;
+                        if (fy === currentFYSave - 1) lySpendSave += amt;
                     });
-                    Object.values(gItemStats).forEach(s => {
-                        s.supplierCount = s.suppliers.size;
-                        if (s.minPrice === Infinity) s.minPrice = 0;
+                }
+                const vsLYGrowthSave = lySpendSave > 0 ? ((fySpendSave - lySpendSave) / lySpendSave) * 100 : 0;
+
+                // Tail transaction count — for Tail Spend card sub-metric on revisit
+                const tailTxnsCountSave = updatedData.filter(r => {
+                    const amt = parseFloat(String(r[amountColSave] || '0').replace(/[^0-9.-]+/g, '')) || 0;
+                    const sup = String(r[supplierCol] || '');
+                    const itm = String(r[itemColSave] || '').toLowerCase();
+                    const isItemProtected = /safety|critical|regulatory/.test(itm);
+                    return (amt < 50000 || gTailSuppliersSet.has(sup)) && !isItemProtected;
+                }).length;
+
+                // Spend Trend chart data — monthly series for the AreaChart on revisit
+                const monthMapSave: Record<string, { spend: number; label: string; timestamp: number }> = {};
+                if (dateCol) {
+                    updatedData.forEach((r, i) => {
+                        const d = r[dateCol] ? new Date(String(r[dateCol])) : null;
+                        if (!d || isNaN(d.getTime())) return;
+                        const monthKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+                        const label = d.toLocaleDateString('en-US', { month: 'short', year: '2-digit' });
+                        const amt = amounts[i] || 0;
+                        if (!monthMapSave[monthKey]) monthMapSave[monthKey] = { spend: 0, label, timestamp: d.getTime() };
+                        monthMapSave[monthKey].spend += amt;
+                    });
+                }
+                const spendHistorySave = Object.values(monthMapSave)
+                    .sort((a, b) => a.timestamp - b.timestamp)
+                    .map((m, idx, arr) => {
+                        const prev = idx > 0 ? arr[idx - 1].spend : null;
+                        const growth = prev ? ((m.spend - prev) / prev) * 100 : 0;
+                        return { month: m.label, spend: m.spend, growth };
                     });
 
-                    const isContractedRefSave = (val: string): boolean => {
-                        if (!val || /^[-–—/\s]*$/.test(val)) return false;
-                        if (/^(n\/?a|none|nil|unverified|not available|no contract|tbd|pending|--)$/i.test(val.trim())) return false;
-                        return /contracted|active|valid|yes|\bY\b|PO-|CT-|CON-|AGR-|\d{4,}/i.test(val);
+                // Spend Distribution — Direct/Indirect split + top categories for the donut + list
+                const catColSave = projectData.mappings['category_l1'] || projectData.mappings['category'] || '';
+                const catMapSave: Record<string, number> = {};
+                let directSpendSave = 0;
+                let indirectSpendSave = 0;
+                updatedData.forEach((r, i) => {
+                    const cat = String(r[catColSave] || 'Uncategorized').trim() || 'Uncategorized';
+                    const amt = amounts[i] || 0;
+                    catMapSave[cat] = (catMapSave[cat] || 0) + amt;
+                    if (/material|factory|production|logistics|freight|packaging|raw|component/i.test(cat)) {
+                        directSpendSave += amt;
+                    } else {
+                        indirectSpendSave += amt;
+                    }
+                });
+                const spendTypeDataSave = [
+                    { name: 'Direct', value: Math.round((directSpendSave / (totalSpendVal || 1)) * 100), color: '#0d9488' },
+                    { name: 'Indirect', value: Math.round((indirectSpendSave / (totalSpendVal || 1)) * 100), color: '#f43f5e' }
+                ].filter(i => i.value > 0);
+                // Deterministic palette so colours are stable across sessions
+                const CAT_PALETTE = ['#22d3ee','#d946ef','#f59e0b','#10b981','#6366f1','#f43f5e','#14b8a6','#8b5cf6','#ec4899','#84cc16','#0ea5e9','#a78bfa','#fb923c','#4ade80','#e879f9'];
+                const topCategoryDataSave = Object.entries(catMapSave)
+                    .sort((a, b) => b[1] - a[1])
+                    .slice(0, 15)
+                    .map(([name, rawSpend], idx) => ({
+                        name,
+                        value: Math.round((rawSpend / (totalSpendVal || 1)) * 100),
+                        rawSpend,
+                        type: /material|factory|production|logistics|freight|packaging|raw|component/i.test(name) ? 'Direct' : 'Indirect',
+                        color: CAT_PALETTE[idx % CAT_PALETTE.length]
+                    }));
+
+                const projectsDocRef = doc(db, 'projects', `${effectiveUid}_${currentProject.id}`);
+
+                // ── Step 1: Write latestAnalysis to Firestore FIRST (critical) ─────────
+                // This must succeed even if the Storage upload below fails.
+                // On revisit, onSnapshot reads latestAnalysis to restore all dashboard KPIs.
+                // Previously this was inside the same try/catch as the Storage upload, which
+                // meant a storage failure (CORS, rules, network) silently prevented
+                // latestAnalysis from ever being saved — causing all data to show as zero on revisit.
+                try {
+                    // ── Intelligent Lever Probabilities (Signal-Driven) ───────────────
+                    // Probabilities are derived from dataset characteristics to provide 
+                    // a realistic "Risk-Adjusted" savings potential.
+                    const clampProb = (v: number) => Math.round(Math.max(5, Math.min(98, v)));
+
+                    const multiSrcItemCount = Object.values(gItemStats).filter(s => s.supplierCount > 1).length;
+                    const buDiversity = Object.keys(buSpendSave).length;
+                    const directPct = updatedData.filter(r => /material|factory|production|logistics|packaging|raw/i.test(String(r[projectData.mappings['category_l1'] || '']))).length / (updatedData.length || 1) * 100;
+
+                    const probs = {
+                        priceArbitrage: clampProb(
+                            55
+                            + (priceArbitrageSave > 0 ? 18 : -15)
+                            + (multiSrcItemCount > 20 ? 12 : multiSrcItemCount > 5 ? 5 : 0)
+                            + (unitPriceColSave ? 5 : -10)
+                        ),
+                        paymentTerms: clampProb(
+                            45
+                            + (ptRiskPctSave > 30 ? 25 : ptRiskPctSave > 10 ? 10 : 0)
+                            + (totalSpendVal > 5_000_000 ? 8 : 0)
+                        ),
+                        volumeDiscount: clampProb(
+                            50
+                            + (gVolDiscSuppliers.size > 10 ? 15 : gVolDiscSuppliers.size > 3 ? 6 : 0)
+                            + (buDiversity >= 3 ? 10 : 0)
+                        ),
+                        singleSource: clampProb(
+                            35
+                            + (singleSourcingPctSave > 40 ? 15 : singleSourcingPctSave > 20 ? 8 : 0)
+                            + (directPct > 50 ? -10 : 5) // harder to shift direct materials
+                        ),
+                        tailSpend: clampProb(
+                            40
+                            + (tailSpendPctSave > 20 ? 20 : tailSpendPctSave > 10 ? 10 : 0)
+                            + (gTailSuppliersSet.size > 20 ? 12 : 5)
+                        )
                     };
 
-                    updatedData.forEach(r => {
-                        const amount = parseFloat(String(r[amountColSave] || '0').replace(/[^0-9.-]+/g, '')) || 0;
-                        const supplier = String(r[supplierCol] || '');
-                        const item = String(r[itemColSave] || '').trim();
-                        const up = parseFloat(String(r[unitPriceColSave] || '0').replace(/[^0-9.-]+/g, '')) || 0;
-                        const qty = parseFloat(String(r[projectData.mappings['quantity']] || '0').replace(/[^0-9.-]+/g, '')) || 0;
-                        const contractRaw = String(r[contractColSave] || r['Contract_Status'] || '').trim();
-                        const hasContract = isContractedRefSave(contractRaw);
-                        const ptVal = String(r[ptColSave] || '').toLowerCase();
-                        if (hasContract) contractedSpendSave += amount;
-                        if (/immediate|cash|net 7|net0|net.?7|pickup|advance|prepay/i.test(ptVal)) ptRiskSpendSave += amount;
+                    // savingsPotentialMin = risk-adjusted (gross × lever probability)
+                    // We use these calculated probabilities to derive the expected value.
+                    const riskAdjustedTotal =
+                        (priceArbitrageSave * probs.priceArbitrage / 100) +
+                        (paymentTermsSave * probs.paymentTerms / 100) +
+                        (volumeDiscountSave * probs.volumeDiscount / 100) +
+                        (singleSourceSave * probs.singleSource / 100) +
+                        (tailSpendSave * probs.tailSpend / 100);
 
-                        let rowSav = 0;
-                        // Lever 1: Price Arbitrage
-                        if (item && gItemStats[item]?.supplierCount > 1 && up > gItemStats[item].minPrice) {
-                            const impliedQty = qty || (up > 0 ? amount / up : 0);
-                            const v = (up - gItemStats[item].minPrice) * impliedQty;
-                            if (v > 0) { rowSav = v; priceVarianceSave += v; totalIdentifiedSavingsSave += v; }
-                        }
-                        // Lever 2: Contract Compliance
-                        if (rowSav === 0 && !hasContract) {
-                            const catL = String(r[projectData.mappings['category_l1'] || projectData.mappings['category']] || '').toLowerCase();
-                            let rate = 0.05;
-                            if (catL.includes('material') || catL.includes('raw') || catL.includes('production')) rate = 0.08;
-                            else if (catL.includes('it') || catL.includes('tech') || catL.includes('software')) rate = 0.06;
-                            else if (catL.includes('logistics') || catL.includes('transport')) rate = 0.07;
-                            else if (catL.includes('facility') || catL.includes('maintenance')) rate = 0.10;
-                            else if (catL.includes('marketing') || catL.includes('media')) rate = 0.08;
-                            rowSav = amount * rate; complianceSave += rowSav; totalIdentifiedSavingsSave += rowSav;
-                        }
-                        // Lever 3: Single Source (contracted sole-source at 3%)
-                        if (rowSav === 0 && item && gItemStats[item]?.supplierCount === 1) {
-                            rowSav = amount * 0.03; singleSourceSave += rowSav; totalIdentifiedSavingsSave += rowSav;
-                        }
-                        // Lever 4: Tail Spend
-                        if (rowSav === 0 && gTailSet.has(supplier)) {
-                            rowSav = amount * 0.10; tailSpendSave += rowSav; totalIdentifiedSavingsSave += rowSav;
-                        }
-                        // Lever 5: Process Efficiency
-                        if (rowSav === 0 && amount < lvThreshold) {
-                            rowSav = peFixedSave; processEffSave += rowSav; totalIdentifiedSavingsSave += rowSav;
-                        }
-                    });
-
-                    const contractedPctSave = totalSpendVal > 0 ? (contractedSpendSave / totalSpendVal) * 100 : 0;
-                    const ptRiskPctSave = totalSpendVal > 0 ? (ptRiskSpendSave / totalSpendVal) * 100 : 0;
-
-                    // Item-level sourcing signals
-                    const iMapSave: Record<string, { spend: number, suppliers: Set<string> }> = {};
-                    updatedData.forEach(r => {
-                        const item = String(r[itemColSave] || '').trim();
-                        if (!item) return;
-                        const sup = String(r[supplierCol] || 'Unknown');
-                        const amt = parseFloat(String(r[amountColSave] || '0').replace(/[^0-9.-]+/g, '')) || 0;
-                        if (!iMapSave[item]) iMapSave[item] = { spend: 0, suppliers: new Set() };
-                        iMapSave[item].spend += amt;
-                        iMapSave[item].suppliers.add(sup);
-                    });
-                    const singleSrcSpendSave = Object.values(iMapSave).filter(i => i.suppliers.size === 1).reduce((a, i) => a + i.spend, 0);
-                    const singleSourcingPctSave = totalSpendVal > 0 ? (singleSrcSpendSave / totalSpendVal) * 100 : 0;
-
-                    // Tail spend % for lever signals
-                    const tailSpendAmtSave = Object.entries(gSupplierSpend).filter(([s]) => gTailSet.has(s)).reduce((a, [, v]) => a + v, 0);
-                    const tailSpendPctSave = gTotal > 0 ? (tailSpendAmtSave / gTotal) * 100 : 0;
-
-                    const dateCol = projectData.mappings['date'];
-                    let dateRangeStart = '';
-                    let dateRangeEnd = '';
-                    if (dateCol) {
-                        const dates = updatedData.map(row => row[dateCol]).filter(Boolean).map(d => new Date(d)).filter(d => !isNaN(d.getTime()));
-                        if (dates.length > 0) {
-                            // Phase 9 MEDIUM-02 FIX: Removed unguarded spread operator Math.max(...dates)
-                            dateRangeStart = new Date(dates.reduce((min, d) => Math.min(min, d.getTime()), dates[0].getTime())).toISOString();
-                            dateRangeEnd = new Date(dates.reduce((max, d) => Math.max(max, d.getTime()), dates[0].getTime())).toISOString();
-                        }
-                    }
-
-                    const rowHashes = updatedData.map(row => `${row[supplierCol]}|${row[amountCol]}|${row[dateCol]}`);
-                    const hashCounts: Record<string, number> = {};
-                    rowHashes.forEach(h => hashCounts[h] = (hashCounts[h] || 0) + 1);
-                    let duplicateCount = 0;
-                    let duplicateValue = 0;
-                    Object.entries(hashCounts).forEach(([hash, count]) => {
-                        if (count > 1) {
-                            duplicateCount += (count - 1);
-                            const amountStr = hash.split('|')[1].replace(/[^0-9.-]+/g, "");
-                            duplicateValue += (parseFloat(amountStr) || 0) * (count - 1);
-                        }
-                    });
-
-                    const projectsDocRef = doc(db, 'projects', `${effectiveUid}_${currentProject.id}`);
                     await updateDoc(projectsDocRef, {
-                        // PERF-03 FIX: We store the URL, not the megabyte JSON block
-                        categoryResultsUrl,
                         status: 'categorization_complete',
                         currentStep: 5,
                         updatedAt: serverTimestamp(),
@@ -1015,17 +1212,17 @@ const ProjectView: React.FC = () => {
                             topVendorSpend,
                             duplicateCount,
                             duplicateValue,
-                            // Savings — use REAL computed values, not synthetic 8-12% estimates
-                            savingsPotentialMin: totalIdentifiedSavingsSave,
-                            savingsPotentialMax: totalIdentifiedSavingsSave * 1.2,
-                            identifiedSavings: totalIdentifiedSavingsSave,
+                            // Savings — v2 pricing levers
+                            identifiedSavings: totalIdentifiedSavingsSave,        // gross total
+                            savingsPotentialMin: Math.min(riskAdjustedTotal, totalSpendVal),
+                            savingsPotentialMax: totalIdentifiedSavingsSave,
                             // Savings breakdown by lever (for Quick-Win / Strategic split on restore)
                             savingsBreakdown: {
-                                priceVariance: priceVarianceSave,
-                                compliance: complianceSave,
+                                priceArbitrage: priceArbitrageSave,
+                                paymentTerms: paymentTermsSave,
+                                volumeDiscount: volumeDiscountSave,
                                 singleSource: singleSourceSave,
                                 tailSpend: tailSpendSave,
-                                processEfficiency: processEffSave,
                             },
                             // Key dataset signals (for data-driven lever probabilities on restore)
                             contractedPercent: contractedPctSave,
@@ -1041,35 +1238,86 @@ const ProjectView: React.FC = () => {
                             totalRows: updatedData.length,
                             mappings: projectData.mappings,
                             currency: projectData.currency,
+                            // Card-retention values — AnalyticsDashboard reads these from
+                            // restoredAnalysis when live rows aren't loaded yet (e.g. on revisit
+                            // before the Storage fetch completes or when Storage is unavailable).
+                            buCount,
+                            locationCount,
+                            avgPOValue: avgPOValueSave,
+                            // FY / YTD / LY spend for Total Spend card sub-metrics
+                            fySpend: fySpendSave,
+                            ytdSpend: ytdSpendSave,
+                            lySpend: lySpendSave,
+                            vsLYGrowth: vsLYGrowthSave,
+                            // Top distributions for KPI bar charts on revisit (max 5 items each; well within 1MB)
+                            topSupplierDistribution: sortedSuppliers.slice(0, 5).map(([name, spend]) => ({
+                                name, value: spend, share: Math.round((spend / (totalSpendVal || 1)) * 100)
+                            })),
+                            topBUDistribution: Object.entries(buSpendSave).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([name, value]) => ({
+                                name, value, share: Math.round((value / (totalSpendVal || 1)) * 100)
+                            })),
+                            topLocationDistribution: Object.entries(locSpendSave).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([name, value]) => ({
+                                name, value, share: Math.round((value / (totalSpendVal || 1)) * 100)
+                            })),
+                            // Tail supplier / transaction counts for Tail Spend card sub-metrics
+                            tailSuppliersCount: gTailSuppliersSet.size,
+                            tailTxnsCount: tailTxnsCountSave,
+                            // Spend Trend chart — monthly series for the AreaChart on revisit
+                            spendHistory: spendHistorySave,
+                            // Spend Distribution chart — Direct/Indirect donut + category list
+                            spendTypeData: spendTypeDataSave,
+                            topCategoryData: topCategoryDataSave,
                             // NOTE: clusters (supplier matches) are already stored in the supplierMatches
                             // field of the project document. Do NOT duplicate them here — large cluster
                             // arrays can push the Firestore document past the 1 MB limit and silently
                             // fail the entire write, causing latestAnalysis to be missing on revisit.
+                            // NOTE: categoryResultsUrl is added separately in Step 2 below.
                         }
                     });
+                } catch (analyticsErr) {
+                    console.error('[Analysis Persist] Failed to write latestAnalysis to Firestore:', analyticsErr);
+                }
 
-                    // Also update the original upload doc for easier global lookups
-                    const uploadsQuery = query(collection(db, 'uploads'), where('projectId', '==', currentProject.id), where('userId', '==', effectiveUid));
-                    const snap = await getDocs(uploadsQuery);
-                    if (!snap.empty) {
-                        await updateDoc(snap.docs[0].ref, {
-                            analysis: {
-                                totalSpend: totalSpendVal,
-                                uniqueVendors: uniqueSuppliers,
-                                uniqueCategories,
-                                savingsPotentialMin: totalIdentifiedSavingsSave,
-                                savingsPotentialMax: totalIdentifiedSavingsSave * 1.2,
-                                identifiedSavings: totalIdentifiedSavingsSave,
-                                duplicateCount,
-                                abcA,
-                                abcB,
-                                abcC,
-                                categoryResultsUrl: categoryResultsUrl // Mirrored for unified download access
-                            }
+                // ── Step 2: Upload categorized rows to Storage, then store the URL ──────
+                // Non-critical: if Storage fails, the dashboard restores KPIs from the
+                // latestAnalysis written above and uses the 100-row Firestore rawGrid preview.
+                try {
+                    if (storage) {
+                        // Phase 9 PERF-03 FIX: Persist large JSON to Storage instead of Firestore doc
+                        const rawJson = JSON.stringify(updatedData);
+                        const rawRef = ref(storage, `uploads/${effectiveUid}/${currentProject.id}/category_results.json`);
+                        await uploadString(rawRef, rawJson, 'raw');
+                        const categoryResultsUrl = await getDownloadURL(rawRef);
+
+                        // Add the storage URL to the project doc now that upload succeeded
+                        await updateDoc(projectsDocRef, {
+                            categoryResultsUrl,
+                            updatedAt: serverTimestamp(),
                         });
+
+                        // Also mirror key analytics to the uploads doc for global lookups
+                        const uploadsQuery = query(collection(db, 'uploads'), where('projectId', '==', currentProject.id), where('userId', '==', effectiveUid));
+                        const snap = await getDocs(uploadsQuery);
+                        if (!snap.empty) {
+                            await updateDoc(snap.docs[0].ref, {
+                                analysis: {
+                                    totalSpend: totalSpendVal,
+                                    uniqueVendors: uniqueSuppliers,
+                                    uniqueCategories,
+                                    savingsPotentialMin: totalIdentifiedSavingsSave,
+                                    savingsPotentialMax: totalIdentifiedSavingsSave * 1.2,
+                                    identifiedSavings: totalIdentifiedSavingsSave,
+                                    duplicateCount,
+                                    abcA,
+                                    abcB,
+                                    abcC,
+                                    categoryResultsUrl // Mirrored for unified download access
+                                }
+                            });
+                        }
                     }
-                } catch (err) {
-                    console.error('[Analysis Persist] Error writing projects doc:', err);
+                } catch (storageErr) {
+                    console.error('[Analysis Persist] Storage upload failed (non-critical — latestAnalysis already saved):', storageErr);
                 }
             })();
         }

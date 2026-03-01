@@ -278,14 +278,22 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
         try {
             const docId = `${effectiveUid}_${id}`;
 
-            // 1. Delete associated uploads
-            const uploadsQuery = query(
-                collection(db, 'uploads'),
-                where('projectId', '==', id)
-            );
-            const uploadsSnap = await getDocs(uploadsQuery);
-            const deletePromises = uploadsSnap.docs.map(d => deleteDoc(d.ref));
-            await Promise.all(deletePromises);
+            // 1. Delete associated uploads.
+            // userId filter is required — without it Firestore rejects the query
+            // because the security rule requires resource.data.userId == request.auth.uid
+            // and that condition can't be proven without the constraint.
+            // Wrapped in its own try/catch so a cleanup failure never blocks project deletion.
+            try {
+                const uploadsQuery = query(
+                    collection(db, 'uploads'),
+                    where('projectId', '==', id),
+                    where('userId', '==', effectiveUid)
+                );
+                const uploadsSnap = await getDocs(uploadsQuery);
+                await Promise.all(uploadsSnap.docs.map(d => deleteDoc(d.ref)));
+            } catch (uploadErr) {
+                console.warn('[ProjectContext] Upload cleanup failed (non-fatal):', uploadErr);
+            }
 
             // 2. Delete the project document
             await deleteDoc(doc(db, 'projects', docId));
