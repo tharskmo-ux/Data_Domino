@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import { useEffectiveUid } from '../../hooks/useEffectiveUid';
-import { db } from '../../lib/firebase';
+import { db, IS_DEMO_MODE } from '../../lib/firebase';
 import {
     collection,
     query,
@@ -173,6 +173,8 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
         }
 
         const fetchProjects = async () => {
+            // Demo mode has no Firestore — keep whatever is already in local state.
+            if (IS_DEMO_MODE) return;
             try {
                 const projectsRef = collection(db, 'projects');
                 const q = query(projectsRef, where('userId', '==', effectiveUid));
@@ -240,11 +242,13 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
                 }]
             };
 
-            await setDoc(doc(db, 'projects', docId), {
-                ...newProject,
-                userId: effectiveUid,
-                updatedAt: serverTimestamp()
-            });
+            if (!IS_DEMO_MODE) {
+                await setDoc(doc(db, 'projects', docId), {
+                    ...newProject,
+                    userId: effectiveUid,
+                    updatedAt: serverTimestamp()
+                });
+            }
 
             setProjects(prev => [...prev, newProject]);
             setCurrentProject(newProject);
@@ -259,11 +263,12 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
         if (!effectiveUid) return;
 
         try {
-            const docId = `${effectiveUid}_${id}`;
-            const projectRef = doc(db, 'projects', docId);
-
-            // If updating stats, ensure we merge properly
-            await setDoc(projectRef, updates, { merge: true });
+            if (!IS_DEMO_MODE) {
+                const docId = `${effectiveUid}_${id}`;
+                const projectRef = doc(db, 'projects', docId);
+                // If updating stats, ensure we merge properly
+                await setDoc(projectRef, updates, { merge: true });
+            }
 
             setProjects(prev => prev.map(p => p.id === id ? { ...p, ...updates } : p));
             if (currentProject?.id === id) {
@@ -276,6 +281,13 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
     const deleteProject = async (id: string) => {
         if (!effectiveUid) return;
+
+        // Demo mode: drop from local state only.
+        if (IS_DEMO_MODE) {
+            setProjects(prev => prev.filter(p => p.id !== id));
+            if (currentProject?.id === id) setCurrentProject(null);
+            return;
+        }
 
         try {
             const docId = `${effectiveUid}_${id}`;
@@ -309,6 +321,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
     };
 
     const checkTrialLimit = async (uid: string): Promise<boolean> => {
+        if (IS_DEMO_MODE) return false;
         // Count only meaningful projects — ones where a file was actually uploaded.
         // Empty step-0 drafts (no file, no pipeline progress) are excluded so they
         // don't block a trial user from ever creating their first real project.
@@ -326,6 +339,16 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
     const addActivity = async (projectId: string, activity: Omit<Project['activities'][0], 'id' | 'timestamp'>) => {
         if (!effectiveUid) return;
+
+        // Demo mode: append to local state only.
+        if (IS_DEMO_MODE) {
+            const newActivity = { ...activity, id: Math.random().toString(36).substr(2, 5), timestamp: new Date().toISOString() };
+            setProjects(prev => prev.map(p => p.id === projectId ? { ...p, activities: [...(p.activities || []), newActivity] } : p));
+            if (currentProject?.id === projectId) {
+                setCurrentProject(prev => prev ? { ...prev, activities: [...(prev.activities || []), newActivity] } : null);
+            }
+            return;
+        }
 
         try {
             const docId = `${effectiveUid}_${projectId}`;

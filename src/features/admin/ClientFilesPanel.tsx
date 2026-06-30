@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { collection, query, where, onSnapshot } from 'firebase/firestore';
-import { db } from '../../lib/firebase';
+import { db, IS_DEMO_MODE } from '../../lib/firebase';
 import { useAdminView } from './AdminViewContext';
 import { useAuth } from '../auth/AuthContext';
 import { useEffectiveUid } from '../../hooks/useEffectiveUid';
@@ -156,6 +156,7 @@ const ClientFilesPanel: React.FC = () => {
 
     useEffect(() => {
         if (!uidToQuery) return;
+        if (IS_DEMO_MODE) { setLoading(false); return; } // no Firestore in demo mode
 
         const uploadsQuery = query(
             collection(db, 'uploads'),

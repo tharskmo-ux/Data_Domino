@@ -36,7 +36,7 @@ const CategoryMapper: React.FC<CategoryMapperProps> = ({ data, mappings, onCompl
     const parentCol = activeLevel === 'l2' ? mappings['category_l1'] :
         activeLevel === 'l3' ? mappings['category_l2'] : undefined;
 
-    const descriptionCol = mappings['description'] || mappings['item'] || mappings['material']; // Fallback for context
+    const descriptionCol = mappings['item_description'] || mappings['description'] || mappings['item'] || mappings['material']; // Fallback for context
 
     // Auto-categorization (HSN -> keyword -> optional AI). Fills empty categories only.
     const [autoBusy, setAutoBusy] = useState(false);

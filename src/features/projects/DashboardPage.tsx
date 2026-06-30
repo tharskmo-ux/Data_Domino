@@ -19,7 +19,7 @@ import { useSubscription } from '../subscription/SubscriptionContext';
 import { cn } from '../../lib/utils';
 import ProjectView from './ProjectView';
 import { signOut } from 'firebase/auth';
-import { auth, db } from '../../lib/firebase';
+import { auth, db, IS_DEMO_MODE } from '../../lib/firebase';
 import {
     collection, query, where,
     onSnapshot, getDocs, deleteDoc
@@ -59,6 +59,7 @@ const DashboardPage = () => {
 
     useEffect(() => {
         const cleanupAbandonedProjects = async (uid: string) => {
+            if (IS_DEMO_MODE) return;
             try {
                 // EXPORT FIX C: Use smart auto-detection for exports too.
                 const allProjectsQuery = query(
@@ -131,6 +132,7 @@ const DashboardPage = () => {
     // Real-time project synchronization
     useEffect(() => {
         if (!effectiveUid) return;
+        if (IS_DEMO_MODE) return; // no Firestore in demo mode; projects live in local state
 
         const q = query(
             collection(db, 'projects'),

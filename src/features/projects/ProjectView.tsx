@@ -31,7 +31,8 @@ import {
     doc,
     onSnapshot,
 } from 'firebase/firestore';
-import { db, storage } from '../../lib/firebase';
+import { db, storage, IS_DEMO_MODE } from '../../lib/firebase';
+import { detectMappings } from '../../utils/columnDetection';
 import { useEffectiveUid } from '../../hooks/useEffectiveUid';
 import { useAdminView } from '../admin/AdminViewContext';
 
@@ -213,6 +214,7 @@ const ProjectView: React.FC = () => {
         // already set (refresh, project switch, direct link), onSnapshot handles
         // all state restoration and sets initialLoadDone itself.
         if (!effectiveUid || currentProject) return;
+        if (IS_DEMO_MODE) { setInitialLoadDone(true); return; }
 
         const loadDashboard = async () => {
             try {
@@ -296,6 +298,7 @@ const ProjectView: React.FC = () => {
 
     useEffect(() => {
         if (!effectiveUid || !currentProject?.id || currentProject.id === 'shared-view') return;
+        if (IS_DEMO_MODE) { setInitialLoadDone(true); return; } // no Firestore sync in demo mode
 
         const projectRef = doc(db, 'projects', `${effectiveUid}_${currentProject.id}`);
 
@@ -627,29 +630,6 @@ const ProjectView: React.FC = () => {
 
         const originalHeaders = projectData.rawSheetData[rowIndex].map((h: any) => String(h || '').trim());
         const cleanHeaders = originalHeaders.map(h => h.replace(/\s+/g, ' '));
-        const initialMappings: Record<string, string> = {};
-
-        cleanHeaders.forEach(header => {
-            const h = header.toLowerCase().replace(/[^a-z0-9]/g, '');
-            if (h.includes('date')) initialMappings['date'] = header;
-            if (h.includes('amount') || h.includes('val') || h.includes('sum')) initialMappings['amount'] = header;
-            if (h.includes('vendor') || h.includes('supplier') || h.includes('name') || h.includes('party')) initialMappings['supplier'] = header;
-            if (h.includes('currency') || h.includes('curr')) initialMappings['currency'] = header;
-            const isCat = h.includes('l1') || h.includes('segment') || h.includes('head') || h.includes('account') || (h.includes('cat') && !h.includes('sub'));
-            if (isCat && !initialMappings['category_l1']) initialMappings['category_l1'] = header;
-            if (h.includes('l2') || h.includes('family') || h.includes('sub')) initialMappings['category_l2'] = header;
-            if (h.includes('l3') || h.includes('class') || h.includes('commodity')) initialMappings['category_l3'] = header;
-            if (!initialMappings['category_l1'] && (h.includes('cat') || h.includes('dept') || h.includes('cost'))) initialMappings['category_l1'] = header;
-            if (h.includes('po') || h.includes('order')) initialMappings['po_number'] = header;
-            if (h.includes('invoice') || h.includes('bill')) initialMappings['invoice_number'] = header;
-            if (h.includes('plant') || h.includes('facility')) initialMappings['plant'] = header;
-            if (h.includes('loc')) initialMappings['location'] = header;
-            if (h.includes('item') || h.includes('desc') || h.includes('sku') || h.includes('part')) initialMappings['item_description'] = header;
-            if (h.includes('contract') || h.includes('agreement')) initialMappings['contract_ref'] = header;
-            if (h.includes('qty') || h.includes('quantity') || h.includes('units') || h.includes('count')) initialMappings['quantity'] = header;
-            if (h.includes('price') || h.includes('rate') || (h.includes('unit') && (h.includes('cost') || h.includes('price')))) initialMappings['unit_price'] = header;
-            if (h.includes('term') || h.includes('pay')) initialMappings['payment_terms'] = header;
-        });
 
         const normalizedWS = normalizeWorksheet(projectData.worksheet);
         let data = XLSX.utils.sheet_to_json(normalizedWS, { range: rowIndex });
@@ -667,6 +647,10 @@ const ProjectView: React.FC = () => {
 
         data = stitchTransactions(data, stickyColumns, markerColumns);
         data = filterNoise(data);
+
+        // Hybrid auto-detection: name patterns + content sniffing on the parsed rows
+        // (replaces the old naive substring matcher). See src/utils/columnDetection.ts.
+        const initialMappings: Record<string, string> = detectMappings(cleanHeaders, data as Array<Record<string, any>>);
 
         const amountCol = initialMappings['amount'];
         const currencyCol = initialMappings['currency'];
