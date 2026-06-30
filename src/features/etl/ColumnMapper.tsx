@@ -53,7 +53,9 @@ const ColumnMapper: React.FC<ColumnMapperProps> = ({ onConfirm, headers, initial
             if (h.includes('amount') || h.includes('val') || h.includes('sum')) initial['amount'] = header;
             if (h.includes('vendor') || h.includes('supplier') || h.includes('name')) initial['supplier'] = header;
             if (h.includes('currency') || h.includes('curr')) initial['currency'] = header;
-            if (h.includes('cat') || h.includes('dept')) initial['category_l1'] = header;
+            // NOTE: do NOT match 'dept' here — DEPARTMENT is not a spend category, and
+            // letting it bind category_l1 silently blocks auto-categorization.
+            if (h.includes('cat')) initial['category_l1'] = header;
             if (h.includes('po') || h.includes('order')) initial['po_number'] = header;
             if (h.includes('plant') || h.includes('facility')) initial['plant'] = header;
             if (h.includes('loc') || h.includes('city') || h.includes('region')) initial['location'] = header;

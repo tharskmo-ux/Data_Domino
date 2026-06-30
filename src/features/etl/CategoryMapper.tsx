@@ -46,8 +46,17 @@ const CategoryMapper: React.FC<CategoryMapperProps> = ({ data, mappings, onCompl
         setAutoBusy(true);
         setAutoSummary(null);
         try {
-            const hsnKey = mappings['hsn_code'] || 'HSN/SAC CODE';
-            const descKey = descriptionCol || 'ITEM DESC.';
+            // Resolve the HSN and description columns robustly: prefer explicit mappings,
+            // then scan the actual row keys (raw ERP headers vary), then a sane fallback.
+            const sample = localData[0] || {};
+            const findKey = (re: RegExp) => Object.keys(sample).find((k) => re.test(k));
+            const hsnKey = mappings['hsn_code'] || findKey(/hsn|sac/i) || 'HSN/SAC CODE';
+            const descKey =
+                mappings['item_description'] ||
+                mappings['description'] ||
+                mappings['item'] ||
+                findKey(/desc|item|material|particular/i) ||
+                'ITEM DESC.';
             const results = await categorize(localData, { hsnKey, descKey }, getClassifier());
 
             const by: Record<string, number> = {};
