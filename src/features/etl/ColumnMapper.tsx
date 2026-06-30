@@ -37,18 +37,19 @@ interface ColumnMapperProps {
     onConfirm: (mappings: Record<string, string>, globalCurrency: string) => void;
     headers: string[];
     initialMappings?: Record<string, string>;
+    sampleRows?: any[];
 }
 
-const ColumnMapper: React.FC<ColumnMapperProps> = ({ onConfirm, headers, initialMappings }) => {
+const ColumnMapper: React.FC<ColumnMapperProps> = ({ onConfirm, headers, initialMappings, sampleRows }) => {
     const [mappings, setMappings] = useState<Record<string, string>>(() => {
         if (initialMappings && Object.keys(initialMappings).length > 0) {
             return initialMappings;
         }
 
-        // Priority-based auto-mapping (see src/utils/columnDetection.ts).
-        // Picks the best header per field and prevents one header (e.g. STATE/NAME)
-        // from hijacking another field.
-        return detectMappings(headers);
+        // Hybrid auto-mapping (see src/utils/columnDetection.ts): name patterns first,
+        // then content sniffing fills the rest from the actual values — so detection
+        // works even when header names are unrecognizable.
+        return detectMappings(headers, sampleRows);
     });
     const [globalCurrency, setGlobalCurrency] = useState('INR');
     const [templates, setTemplates] = useState<Record<string, Record<string, string>>>(() => {

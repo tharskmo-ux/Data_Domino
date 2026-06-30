@@ -3,6 +3,8 @@
  * when explicit mappings are missing.
  */
 
+import { profileColumn } from './columnContent';
+
 export const COLUMN_PATTERNS = {
     amount: /^amount$|^total.?amount$|^net.?amount$|^invoice.?amount$|^value$/i,
     supplier: /^supplier$|^vendor$|^vendor.?name$|^supplier.?name$|^creaditor$/i,
@@ -46,7 +48,8 @@ const FIELD_PRIORITY: Array<[string, RegExp[]]> = [
     ['contract_ref', [/contract/i, /agreement/i]],
 ];
 
-export const detectMappings = (headers: string[]): Record<string, string> => {
+/** Name-based detection only (header text). */
+export const detectByName = (headers: string[]): Record<string, string> => {
     const result: Record<string, string> = {};
     const used = new Set<string>();
 
@@ -61,6 +64,88 @@ export const detectMappings = (headers: string[]): Record<string, string> => {
         if (best) {
             result[field] = best.header;
             used.add(best.header);
+        }
+    }
+    return result;
+};
+
+/**
+ * Content-based detection. Infers a field from the actual VALUES in each column,
+ * so it works even when the header name is unrecognizable. Only fills fields not
+ * already taken, and never reuses a header already claimed (via `taken`).
+ */
+export const detectByContent = (
+    headers: string[],
+    rows: Array<Record<string, any>>,
+    taken: Set<string> = new Set(),
+): Record<string, string> => {
+    const result: Record<string, string> = {};
+    if (!rows || rows.length === 0) return result;
+
+    const sample = rows.slice(0, 300);
+    const profiles: Record<string, ReturnType<typeof profileColumn>> = {};
+    for (const h of headers) {
+        if (!taken.has(h)) profiles[h] = profileColumn(sample.map((r) => r[h]));
+    }
+
+    const claimed = new Set<string>();
+    const avail = () => headers.filter((h) => !taken.has(h) && !claimed.has(h) && profiles[h]?.count > 0);
+    const claim = (field: string, header?: string) => {
+        if (header) { result[field] = header; claimed.add(header); }
+    };
+
+    // date — highest date fraction
+    const dateCol = avail()
+        .filter((h) => profiles[h].dateFraction > 0.6)
+        .sort((a, b) => profiles[b].dateFraction - profiles[a].dateFraction)[0];
+    claim('date', dateCol);
+
+    // hsn — pure 4/6/8-digit codes (claimed before amount so big HSN numbers
+    // can't be mistaken for spend). High threshold avoids catching round amounts.
+    const hsnCol = avail()
+        .filter((h) => profiles[h].digitCodeFraction > 0.85 && profiles[h].dateFraction < 0.3)
+        .sort((a, b) => profiles[b].digitCodeFraction - profiles[a].digitCodeFraction)[0];
+    claim('hsn_code', hsnCol);
+
+    // amount — numeric column with the largest total (the spend column). HSN is
+    // already claimed, so it won't be considered here.
+    const amountCol = avail()
+        .filter((h) => profiles[h].numericFraction > 0.6 && profiles[h].dateFraction < 0.3)
+        .sort((a, b) => profiles[b].sum - profiles[a].sum)[0];
+    claim('amount', amountCol);
+
+    // item_description — longest free text, mostly unique
+    const descCol = avail()
+        .filter((h) => profiles[h].numericFraction < 0.3 && profiles[h].dateFraction < 0.3 && profiles[h].avgLen >= 8)
+        .sort((a, b) => profiles[b].avgLen - profiles[a].avgLen)[0];
+    claim('item_description', descCol);
+
+    // supplier — text that repeats (lower distinct ratio), not the description
+    const supplierCol = avail()
+        .filter((h) => profiles[h].numericFraction < 0.3 && profiles[h].dateFraction < 0.3 && profiles[h].avgLen >= 4 && profiles[h].distinctRatio < 0.9)
+        .sort((a, b) => profiles[a].distinctRatio - profiles[b].distinctRatio)[0];
+    claim('supplier', supplierCol);
+
+    return result;
+};
+
+/**
+ * Hybrid auto-detector: name patterns first (high precision), then content
+ * sniffing fills whatever's still missing (high recall, name-independent).
+ */
+export const detectMappings = (
+    headers: string[],
+    rows?: Array<Record<string, any>>,
+): Record<string, string> => {
+    const result = { ...detectByName(headers) };
+
+    if (rows && rows.length > 0) {
+        const taken = new Set<string>(Object.values(result));
+        const byContent = detectByContent(headers, rows, taken);
+        for (const [field, header] of Object.entries(byContent)) {
+            if (!result[field] && !Object.values(result).includes(header)) {
+                result[field] = header;
+            }
         }
     }
     return result;

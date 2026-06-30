@@ -1749,7 +1749,7 @@ const ProjectView: React.FC = () => {
                                     </div>
                                 </motion.div>
                             )}
-                            {activeStep === 'mapping' && <ColumnMapper onConfirm={handleMappingComplete} headers={projectData.headers} initialMappings={projectData.mappings} />}
+                            {activeStep === 'mapping' && <ColumnMapper onConfirm={handleMappingComplete} headers={projectData.headers} initialMappings={projectData.mappings} sampleRows={projectData.raw} />}
                             {activeStep === 'header-selection' && (
                                 projectData.rawSheetData && projectData.rawSheetData.length > 0 ? (
                                     <HeaderRowSelector rawData={projectData.rawSheetData} merges={projectData.merges} initialSelectedRow={currentProject?.selectedHeaderRow} onSelect={handleHeaderRowSelection} />
