@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { ArrowRight, Check, AlertCircle, HelpCircle, Save, FolderOpen, Trash2, Wallet } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { cn } from '../../lib/utils';
+import { detectMappings } from '../../utils/columnDetection';
 
 interface MappingField {
     id: string;
@@ -16,6 +17,7 @@ const SYSTEM_FIELDS: MappingField[] = [
     { id: 'amount', name: 'Total Amount', required: true, description: 'Total value including taxes.' },
     { id: 'supplier', name: 'Supplier Name', required: true, description: 'Legal name of the vendor.' },
     { id: 'currency', name: 'Currency', required: false, description: 'ISO code or symbol (e.g., INR, $).' },
+    { id: 'hsn_code', name: 'HSN/SAC Code', required: false, description: 'GST HSN/SAC tax code — drives auto-categorization.' },
     { id: 'category_l1', name: 'Category L1', required: false, description: 'High-level procurement category.' },
     { id: 'category_l2', name: 'Category L2', required: false, description: 'Mid-level procurement category.' },
     { id: 'category_l3', name: 'Category L3', required: false, description: 'Detailed procurement category.' },
@@ -43,28 +45,10 @@ const ColumnMapper: React.FC<ColumnMapperProps> = ({ onConfirm, headers, initial
             return initialMappings;
         }
 
-        // Intelligent Auto-mapping logic
-        const initial: Record<string, string> = {};
-
-        headers.forEach(header => {
-            const h = header.toLowerCase().replace(/[^a-z0-9]/g, '');
-
-            if (h.includes('date')) initial['date'] = header;
-            if (h.includes('amount') || h.includes('val') || h.includes('sum')) initial['amount'] = header;
-            if (h.includes('vendor') || h.includes('supplier') || h.includes('name')) initial['supplier'] = header;
-            if (h.includes('currency') || h.includes('curr')) initial['currency'] = header;
-            // NOTE: do NOT match 'dept' here — DEPARTMENT is not a spend category, and
-            // letting it bind category_l1 silently blocks auto-categorization.
-            if (h.includes('cat')) initial['category_l1'] = header;
-            if (h.includes('po') || h.includes('order')) initial['po_number'] = header;
-            if (h.includes('plant') || h.includes('facility')) initial['plant'] = header;
-            if (h.includes('loc') || h.includes('city') || h.includes('region')) initial['location'] = header;
-            if (h.includes('bu') || h.includes('unit') || h.includes('division')) initial['business_unit'] = header;
-            if (h.includes('contract') || h.includes('agreement')) initial['contract_ref'] = header;
-            if (h.includes('item') || h.includes('desc') || h.includes('sku') || h.includes('part')) initial['item_description'] = header;
-        });
-
-        return initial;
+        // Priority-based auto-mapping (see src/utils/columnDetection.ts).
+        // Picks the best header per field and prevents one header (e.g. STATE/NAME)
+        // from hijacking another field.
+        return detectMappings(headers);
     });
     const [globalCurrency, setGlobalCurrency] = useState('INR');
     const [templates, setTemplates] = useState<Record<string, Record<string, string>>>(() => {
