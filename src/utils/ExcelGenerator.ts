@@ -119,6 +119,35 @@ function resolveKey(sample: DataRow | undefined, candidates: (string | undefined
     return candidates.find(Boolean) ?? fallback;
 }
 
+// ---------------------------------------------------------------------------
+// Sheet names — centralised so the order/numbering and the SUMIF cross-reference
+// to the cleaned-data sheet can never drift apart.
+// ---------------------------------------------------------------------------
+const SHEETS = {
+    readme: '00_README',
+    exec: '01_Executive_Summary',
+    abc: '02_ABC_Analysis',
+    category: '03_Spend_by_Category',
+    vendor: '04_Spend_by_Vendor',
+    trend: '05_Spend_Trend',
+    deptGeo: '06_Spend_by_Dept_Geo',
+    concentration: '07_Supplier_Concentration',
+    benchmark: '08_MultiVendor_Benchmark',
+    savings: '09_Savings_Opportunities',
+    cleaned: '10_Cleaned_Data',
+} as const;
+
+/** Assign A/B/C Pareto tiers over rows already sorted by spend desc. A<=80%, B<=95%, else C. */
+function classifyABC<T extends { spend: number }>(rows: T[], total: number): Array<T & { cum: number; cls: 'A' | 'B' | 'C' }> {
+    let running = 0;
+    return rows.map((r) => {
+        running += r.spend;
+        const cum = total > 0 ? running / total : 0;
+        const cls = cum <= 0.8 ? 'A' : cum <= 0.95 ? 'B' : 'C';
+        return { ...r, cum, cls };
+    });
+}
+
 // ===========================================================================
 // ExcelGenerator
 // ===========================================================================
@@ -157,7 +186,9 @@ export class ExcelGenerator {
         // generator still works even when the mapping step skipped a column.
         this.amtKey     = resolveKey(s, [this.m.amount, this.m.invoice_amount, 'BASIC AMOUNT', 'Basic Amount'], 'Amount');
         this.supKey     = resolveKey(s, [this.m.supplier, this.m.vendor, 'PARTY NAME', 'Vendor'], 'Vendor');
-        this.catKey     = resolveKey(s, [this.m.category_l1, this.m.category, 'Category', 'CATEGORY'], 'Category');
+        // Include the lowercase 'category' key the CategoryMapper writes its auto-
+        // categorization results into (falls here when no category column was mapped).
+        this.catKey     = resolveKey(s, [this.m.category_l1, this.m.category, 'category_l1', 'category', 'Category', 'CATEGORY', 'Category_L1'], 'category');
         this.dateKey    = resolveKey(s, [this.m.date, this.m.mrn_date, this.m.invoice_date, this.m.po_date, 'MRN DATE'], 'Date');
         this.qtyKey     = resolveKey(s, [this.m.quantity, 'QTY RCVD.', 'QTY RCVD', 'Qty'], 'Qty');
         this.rateKey    = resolveKey(s, [this.m.net_rate, this.m.unit_price, 'NET RATE', 'Net Rate'], 'Net Rate');
@@ -187,8 +218,12 @@ export class ExcelGenerator {
 
         this.createReadme(stats);
         this.createExecutiveSummary(stats);
+        this.createABC(stats);
         this.createSpendByCategory(stats);
         this.createSpendByVendor(stats);
+        this.createSpendTrend(stats);
+        this.createSpendByDeptGeo(stats);
+        this.createConcentration(stats);
         this.createMultiVendorBenchmark(stats);
         this.createSavings(stats);
         this.createCleanedData();   // last sheet, but report sheets above reference it by name
@@ -220,6 +255,10 @@ export class ExcelGenerator {
             qty: number; spend: number;
             vendors: Map<string, { qty: number; spend: number }>;
         }>();
+        // Department, geography (state) and monthly aggregations
+        const deptMap = new Map<string, { spend: number; lines: number }>();
+        const stateMap = new Map<string, { spend: number; lines: number; vendors: Set<string> }>();
+        const monthMap = new Map<string, { spend: number; lines: number }>();
 
         for (const row of data) {
             const basic = parseAmount(row[this.amtKey]);
@@ -228,12 +267,25 @@ export class ExcelGenerator {
             const cat = str(row[this.catKey], 'Other / Uncategorized');
             const qty = parseAmount(row[this.qtyKey]);
             const uom = str(row[this.uomKey], '');
+            const dept = str(row[this.deptKey], 'Unspecified');
+            const state = str(row[this.stateKey], 'Unspecified');
+            const dt = parseDate(row[this.dateKey]);
+            const ym = dt ? `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}` : 'Undated';
 
             totalBasic += basic;
             totalGross += parseAmount(row[this.grossKey]);
             totalFreight += parseAmount(row[this.freightKey]);
             if (ven && ven !== 'Unknown') vendorSet.add(ven);
             if (item && item !== 'Unknown') itemSet.add(item);
+
+            const de = deptMap.get(dept) ?? { spend: 0, lines: 0 };
+            de.spend += basic; de.lines += 1; deptMap.set(dept, de);
+
+            const ste = stateMap.get(state) ?? { spend: 0, lines: 0, vendors: new Set<string>() };
+            ste.spend += basic; ste.lines += 1; ste.vendors.add(ven); stateMap.set(state, ste);
+
+            const moe = monthMap.get(ym) ?? { spend: 0, lines: 0 };
+            moe.spend += basic; moe.lines += 1; monthMap.set(ym, moe);
 
             const ce = catMap.get(cat) ?? { spend: 0, lines: 0 };
             ce.spend += basic; ce.lines += 1; catMap.set(cat, ce);
@@ -303,15 +355,43 @@ export class ExcelGenerator {
 
         const top3Conc = totalBasic > 0
             ? vendors.slice(0, 3).reduce((acc, v) => acc + v.spend, 0) / totalBasic : 0;
+        const top10Conc = totalBasic > 0
+            ? vendors.slice(0, 10).reduce((acc, v) => acc + v.spend, 0) / totalBasic : 0;
         const tailVendors = vendors.filter(v => v.spend < 200000); // < Rs 2L/yr
+
+        // Herfindahl-Hirschman Index over vendor market shares (0..10000)
+        const hhi = totalBasic > 0
+            ? vendors.reduce((acc, v) => { const sh = (v.spend / totalBasic) * 100; return acc + sh * sh; }, 0) : 0;
+
+        // Items ranked by spend (for ABC + single-source detection)
+        const items = [...itemMap.entries()]
+            .map(([code, d]) => ({ code, desc: d.desc, spend: d.spend, qty: d.qty, vendorCount: d.vendors.size }))
+            .sort((a, b) => b.spend - a.spend);
+        // Single-source items (exactly one vendor), highest spend first
+        const singleSource = items.filter(it => it.vendorCount === 1 && it.spend > 0);
+
+        // Department + geography breakdowns
+        const departments = [...deptMap.entries()]
+            .map(([name, d]) => ({ name, spend: d.spend, lines: d.lines }))
+            .sort((a, b) => b.spend - a.spend);
+        const states = [...stateMap.entries()]
+            .map(([name, d]) => ({ name, spend: d.spend, lines: d.lines, vendorCount: d.vendors.size }))
+            .sort((a, b) => b.spend - a.spend);
+
+        // Monthly trend, chronological, with the "Undated" bucket pushed to the end
+        const months = [...monthMap.entries()]
+            .map(([name, d]) => ({ name, spend: d.spend, lines: d.lines }))
+            .sort((a, b) =>
+                a.name === 'Undated' ? 1 : b.name === 'Undated' ? -1 : a.name.localeCompare(b.name));
 
         return {
             totalBasic, totalGross, totalFreight,
             uniqueVendors: vendorSet.size, uniqueItems: itemSet.size, lineItems: data.length,
-            categories, vendors, benchmark,
+            categories, vendors, benchmark, items, singleSource,
+            departments, states, months,
             multiVendorSpend, fuelSpend,
             rateHarmonisationSaving, rateHarmonisationSpend,
-            top3Conc, tailVendors,
+            top3Conc, top10Conc, tailVendors, hhi,
         };
     }
 
@@ -349,7 +429,7 @@ export class ExcelGenerator {
     // SHEET 00 — README
     // -----------------------------------------------------------------------
     private createReadme(_stats: ReturnType<ExcelGenerator['buildStats']>) {
-        const ws = this.wb.addWorksheet('00_README', { views: [{ showGridLines: false }] });
+        const ws = this.wb.addWorksheet(SHEETS.readme, { views: [{ showGridLines: false }] });
         ws.getColumn(1).width = 2;
         ws.getColumn(2).width = 110;
         const lines: Array<[string, 'title' | 'h' | 'p']> = [
@@ -358,11 +438,15 @@ export class ExcelGenerator {
             ['', 'p'],
             ['WHAT THIS WORKBOOK CONTAINS', 'h'],
             ['01_Executive_Summary  – headline spend, vendor and savings KPIs.', 'p'],
-            ['02_Spend_by_Category  – pre-tax spend grouped by category (live formulas off 06_Cleaned_Data).', 'p'],
-            ['03_Spend_by_Vendor  – vendors ranked by spend with Pareto cumulative %.', 'p'],
-            ['04_MultiVendor_Benchmark  – items bought from 2+ vendors, rate gap and potential saving.', 'p'],
-            ['05_Savings_Opportunities  – quantified and structural cost levers.', 'p'],
-            ['06_Cleaned_Data  – the normalised transaction grid all sheets are built from.', 'p'],
+            ['02_ABC_Analysis  – items & vendors classified into A/B/C Pareto tiers (80/15/5).', 'p'],
+            ['03_Spend_by_Category  – pre-tax spend grouped by category (live formulas off 10_Cleaned_Data).', 'p'],
+            ['04_Spend_by_Vendor  – vendors ranked by spend with Pareto cumulative %.', 'p'],
+            ['05_Spend_Trend  – spend by month and quarter, with seasonality footnotes.', 'p'],
+            ['06_Spend_by_Dept_Geo  – spend broken down by department and by state.', 'p'],
+            ['07_Supplier_Concentration  – HHI, top-N concentration and single-source dependency risk.', 'p'],
+            ['08_MultiVendor_Benchmark  – items bought from 2+ vendors, rate gap and potential saving.', 'p'],
+            ['09_Savings_Opportunities  – quantified and structural cost levers.', 'p'],
+            ['10_Cleaned_Data  – the normalised transaction grid all sheets are built from.', 'p'],
             ['', 'p'],
             ['HOW SPEND IS MEASURED', 'h'],
             ['"Spend" = BASIC AMOUNT (pre-tax). Tax-inclusive totals are shown separately on the summary.', 'p'],
@@ -389,7 +473,7 @@ export class ExcelGenerator {
     // SHEET 01 — Executive Summary (KPI tiles)
     // -----------------------------------------------------------------------
     private createExecutiveSummary(stats: ReturnType<ExcelGenerator['buildStats']>) {
-        const ws = this.wb.addWorksheet('01_Executive_Summary', { views: [{ showGridLines: false }] });
+        const ws = this.wb.addWorksheet(SHEETS.exec, { views: [{ showGridLines: false }] });
         ws.getColumn(1).width = 2;
         ws.getColumn(2).width = 26; ws.getColumn(3).width = 18;
         ws.getColumn(4).width = 3;
@@ -437,7 +521,7 @@ export class ExcelGenerator {
     // SHEET 02 — Spend by Category (live SUMIF off 06_Cleaned_Data)
     // -----------------------------------------------------------------------
     private createSpendByCategory(stats: ReturnType<ExcelGenerator['buildStats']>) {
-        const ws = this.wb.addWorksheet('02_Spend_by_Category');
+        const ws = this.wb.addWorksheet(SHEETS.category);
         ws.getColumn(1).width = 34; ws.getColumn(2).width = 20;
         ws.getColumn(3).width = 10; ws.getColumn(4).width = 11; ws.getColumn(5).width = 12;
 
@@ -454,7 +538,7 @@ export class ExcelGenerator {
         for (const cat of stats.categories) {
             ws.getCell(`A${r}`).value = cat.name;
             // Live formula so the workbook ties to 06_Cleaned_Data (Category=col K, Basic Amount=col O)
-            ws.getCell(`B${r}`).value = { formula: `SUMIF('06_Cleaned_Data'!K2:K${lastRow},A${r},'06_Cleaned_Data'!O2:O${lastRow})` };
+            ws.getCell(`B${r}`).value = { formula: `SUMIF('${SHEETS.cleaned}'!K2:K${lastRow},A${r},'${SHEETS.cleaned}'!O2:O${lastRow})` };
             ws.getCell(`B${r}`).numFmt = '#,##0';
             ws.getCell(`C${r}`).value = { formula: `B${r}/10000000` };
             ws.getCell(`C${r}`).numFmt = '#,##0.00';
@@ -485,7 +569,7 @@ export class ExcelGenerator {
     // SHEET 03 — Spend by Vendor (Pareto)
     // -----------------------------------------------------------------------
     private createSpendByVendor(stats: ReturnType<ExcelGenerator['buildStats']>) {
-        const ws = this.wb.addWorksheet('03_Spend_by_Vendor');
+        const ws = this.wb.addWorksheet(SHEETS.vendor);
         const widths = [6, 38, 20, 10, 11, 9, 8, 9];
         widths.forEach((w, i) => (ws.getColumn(i + 1).width = w));
 
@@ -524,7 +608,7 @@ export class ExcelGenerator {
     // SHEET 04 — Multi-Vendor Benchmark
     // -----------------------------------------------------------------------
     private createMultiVendorBenchmark(stats: ReturnType<ExcelGenerator['buildStats']>) {
-        const ws = this.wb.addWorksheet('04_MultiVendor_Benchmark');
+        const ws = this.wb.addWorksheet(SHEETS.benchmark);
         const widths = [14, 40, 24, 8, 10, 14, 18, 14, 14, 28, 9, 18, 10];
         widths.forEach((w, i) => (ws.getColumn(i + 1).width = w));
 
@@ -562,7 +646,7 @@ export class ExcelGenerator {
     // SHEET 05 — Savings Opportunities (quantified + structural)
     // -----------------------------------------------------------------------
     private createSavings(stats: ReturnType<ExcelGenerator['buildStats']>) {
-        const ws = this.wb.addWorksheet('05_Savings_Opportunities');
+        const ws = this.wb.addWorksheet(SHEETS.savings);
         const widths = [4, 30, 44, 18, 18, 22, 44];
         widths.forEach((w, i) => (ws.getColumn(i + 1).width = w));
 
@@ -625,11 +709,228 @@ export class ExcelGenerator {
     }
 
     // -----------------------------------------------------------------------
-    // SHEET 06 — Cleaned Data (18-column normalised grid)
-    // 02_Spend_by_Category SUMIF depends on this column order: K=Category, O=Basic Amount.
+    // SHEET 02 — ABC Analysis (Pareto tiers by item and by vendor)
+    // -----------------------------------------------------------------------
+    private createABC(stats: ReturnType<ExcelGenerator['buildStats']>) {
+        const ws = this.wb.addWorksheet(SHEETS.abc, { views: [{ showGridLines: false }] });
+        const widths = [7, 18, 40, 18, 11, 10, 8];
+        widths.forEach((w, i) => (ws.getColumn(i + 1).width = w));
+
+        this.styleTitle(ws.getCell('A1'), 'ABC Analysis (Pareto 80 / 15 / 5)');
+        const note = ws.getCell('A2');
+        note.value = 'A = the items/vendors making up the first 80% of spend, B = next 15%, C = last 5%. Concentrate effort on A.';
+        note.font = { italic: true, color: { argb: SUBTLE_TEXT } };
+
+        const summarize = (rows: Array<{ cls: 'A' | 'B' | 'C'; spend: number }>) => {
+            const by = { A: { n: 0, spend: 0 }, B: { n: 0, spend: 0 }, C: { n: 0, spend: 0 } };
+            rows.forEach((x) => { by[x.cls].n++; by[x.cls].spend += x.spend; });
+            return by;
+        };
+        const pct = (v: number) => (stats.totalBasic ? (v / stats.totalBasic) * 100 : 0).toFixed(0);
+
+        // ---- BY ITEM (list A+B fully, summarise the long C tail) ----
+        const itemRows = classifyABC(stats.items, stats.totalBasic);
+        const iSum = summarize(itemRows);
+        let r = 4;
+        ws.getCell(`A${r}`).value = 'BY ITEM';
+        ws.getCell(`A${r}`).font = { bold: true, size: 12, color: { argb: HEADER_FILL } };
+        r++;
+        ws.getCell(`A${r}`).value = `A: ${iSum.A.n} items = ${pct(iSum.A.spend)}% of spend  ·  B: ${iSum.B.n}  ·  C: ${iSum.C.n}`;
+        ws.getCell(`A${r}`).font = { size: 10, color: { argb: SUBTLE_TEXT } };
+        r++;
+        const ihdr = ws.getRow(r);
+        ihdr.values = ['Rank', 'Item Code', 'Description', 'Spend (Rs)', '% of Total', 'Cum %', 'Class'];
+        this.styleHeaderRow(ihdr); r++;
+        let rank = 0;
+        for (const it of itemRows) {
+            rank++;
+            if (it.cls === 'C') break;
+            const row = ws.getRow(r);
+            row.values = [rank, it.code, it.desc, it.spend, stats.totalBasic ? it.spend / stats.totalBasic : 0, it.cum, it.cls];
+            row.getCell(4).numFmt = '#,##0'; row.getCell(5).numFmt = '0.0%'; row.getCell(6).numFmt = '0.0%';
+            r++;
+        }
+        if (iSum.C.n > 0) {
+            const row = ws.getRow(r);
+            row.values = ['', `C class (${iSum.C.n} items)`, 'long tail — small individual spend', iSum.C.spend, stats.totalBasic ? iSum.C.spend / stats.totalBasic : 0, 1, 'C'];
+            row.getCell(4).numFmt = '#,##0'; row.getCell(5).numFmt = '0.0%';
+            row.eachCell({ includeEmpty: true }, (c) => { c.font = { italic: true, color: { argb: SUBTLE_TEXT } }; });
+            r++;
+        }
+
+        // ---- BY VENDOR ----
+        r += 2;
+        const venRows = classifyABC(stats.vendors, stats.totalBasic);
+        const vSum = summarize(venRows);
+        ws.getCell(`A${r}`).value = 'BY VENDOR';
+        ws.getCell(`A${r}`).font = { bold: true, size: 12, color: { argb: HEADER_FILL } };
+        r++;
+        ws.getCell(`A${r}`).value = `A: ${vSum.A.n} vendors = ${pct(vSum.A.spend)}% of spend  ·  B: ${vSum.B.n}  ·  C: ${vSum.C.n}`;
+        ws.getCell(`A${r}`).font = { size: 10, color: { argb: SUBTLE_TEXT } };
+        r++;
+        const vhdr = ws.getRow(r);
+        vhdr.values = ['Rank', 'Vendor', '', 'Spend (Rs)', '% of Total', 'Cum %', 'Class'];
+        this.styleHeaderRow(vhdr); r++;
+        let vrank = 0;
+        for (const v of venRows) {
+            vrank++;
+            const row = ws.getRow(r);
+            row.values = [vrank, v.name, '', v.spend, stats.totalBasic ? v.spend / stats.totalBasic : 0, v.cum, v.cls];
+            row.getCell(4).numFmt = '#,##0'; row.getCell(5).numFmt = '0.0%'; row.getCell(6).numFmt = '0.0%';
+            r++;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // SHEET 05 — Spend Trend (monthly + quarterly)
+    // -----------------------------------------------------------------------
+    private createSpendTrend(stats: ReturnType<ExcelGenerator['buildStats']>) {
+        const ws = this.wb.addWorksheet(SHEETS.trend, { views: [{ showGridLines: false }] });
+        const widths = [14, 20, 10, 11, 12];
+        widths.forEach((w, i) => (ws.getColumn(i + 1).width = w));
+
+        this.styleTitle(ws.getCell('A1'), 'Spend Trend');
+        const hdr = ws.getRow(3);
+        hdr.values = ['Period', 'Spend (Rs)', 'Rs Cr', 'Line Items', 'MoM %'];
+        this.styleHeaderRow(hdr);
+
+        let r = 4;
+        let prev = 0;
+        const dated = stats.months.filter((m) => m.name !== 'Undated');
+        const undated = stats.months.find((m) => m.name === 'Undated');
+        let peak = { name: '-', spend: -1 };
+        let trough = { name: '-', spend: Infinity };
+        for (const m of stats.months) {
+            const row = ws.getRow(r);
+            const mom: number | string = (m.name !== 'Undated' && prev > 0) ? (m.spend - prev) / prev : '';
+            row.values = [m.name, m.spend, m.spend / 1e7, m.lines, mom];
+            row.getCell(2).numFmt = '#,##0'; row.getCell(3).numFmt = '#,##0.00';
+            if (typeof mom === 'number') row.getCell(5).numFmt = '0.0%';
+            if (m.name !== 'Undated') {
+                if (m.spend > peak.spend) peak = { name: m.name, spend: m.spend };
+                if (m.spend < trough.spend) trough = { name: m.name, spend: m.spend };
+                prev = m.spend;
+            }
+            r++;
+        }
+
+        // Quarterly roll-up
+        r += 2;
+        ws.getCell(`A${r}`).value = 'QUARTERLY';
+        ws.getCell(`A${r}`).font = { bold: true, size: 12, color: { argb: HEADER_FILL } };
+        r++;
+        const qmap = new Map<string, number>();
+        for (const m of dated) {
+            const [y, mo] = m.name.split('-').map(Number);
+            const q = `${y}-Q${Math.floor((mo - 1) / 3) + 1}`;
+            qmap.set(q, (qmap.get(q) || 0) + m.spend);
+        }
+        const qhdr = ws.getRow(r); qhdr.values = ['Quarter', 'Spend (Rs)', 'Rs Cr']; this.styleHeaderRow(qhdr); r++;
+        for (const [q, sp] of [...qmap.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+            const row = ws.getRow(r);
+            row.values = [q, sp, sp / 1e7];
+            row.getCell(2).numFmt = '#,##0'; row.getCell(3).numFmt = '#,##0.00';
+            r++;
+        }
+
+        r += 1;
+        const foot = ws.getCell(`A${r}`);
+        foot.value = `Peak: ${peak.name} (${this.fmtCr(Math.max(0, peak.spend))})  ·  Trough: ${trough.name} (${this.fmtCr(trough.spend === Infinity ? 0 : trough.spend)})  ·  Undated rows: ${undated ? undated.lines : 0}`;
+        foot.font = { italic: true, color: { argb: SUBTLE_TEXT } };
+    }
+
+    // -----------------------------------------------------------------------
+    // SHEET 06 — Spend by Department & Geography
+    // -----------------------------------------------------------------------
+    private createSpendByDeptGeo(stats: ReturnType<ExcelGenerator['buildStats']>) {
+        const ws = this.wb.addWorksheet(SHEETS.deptGeo, { views: [{ showGridLines: false }] });
+        const widths = [34, 20, 12, 12, 11];
+        widths.forEach((w, i) => (ws.getColumn(i + 1).width = w));
+
+        this.styleTitle(ws.getCell('A1'), 'Spend by Department & Geography');
+
+        let r = 3;
+        const table = (
+            title: string,
+            rows: Array<{ name: string; spend: number; lines: number; vendorCount?: number }>,
+            withVendors: boolean,
+        ) => {
+            ws.getCell(`A${r}`).value = title;
+            ws.getCell(`A${r}`).font = { bold: true, size: 12, color: { argb: HEADER_FILL } };
+            r++;
+            const hdr = ws.getRow(r);
+            hdr.values = withVendors
+                ? ['Name', 'Spend (Rs)', '% of Total', 'Line Items', 'Vendors']
+                : ['Name', 'Spend (Rs)', '% of Total', 'Line Items'];
+            this.styleHeaderRow(hdr); r++;
+            let tot = 0;
+            for (const x of rows) {
+                tot += x.spend;
+                const row = ws.getRow(r);
+                const base = [x.name, x.spend, stats.totalBasic ? x.spend / stats.totalBasic : 0, x.lines];
+                row.values = withVendors ? [...base, x.vendorCount ?? 0] : base;
+                row.getCell(2).numFmt = '#,##0'; row.getCell(3).numFmt = '0.0%';
+                r++;
+            }
+            const trow = ws.getRow(r);
+            trow.getCell(1).value = 'TOTAL'; trow.getCell(2).value = tot; trow.getCell(2).numFmt = '#,##0';
+            trow.eachCell({ includeEmpty: true }, (c) => {
+                c.font = { bold: true };
+                c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: TOTAL_FILL } };
+            });
+            r += 3;
+        };
+
+        table('BY DEPARTMENT', stats.departments, false);
+        table('BY STATE / GEOGRAPHY', stats.states, true);
+    }
+
+    // -----------------------------------------------------------------------
+    // SHEET 07 — Supplier Concentration & Risk (HHI, top-N, single-source)
+    // -----------------------------------------------------------------------
+    private createConcentration(stats: ReturnType<ExcelGenerator['buildStats']>) {
+        const ws = this.wb.addWorksheet(SHEETS.concentration, { views: [{ showGridLines: false }] });
+        const widths = [16, 44, 18, 12];
+        widths.forEach((w, i) => (ws.getColumn(i + 1).width = w));
+
+        this.styleTitle(ws.getCell('A1'), 'Supplier Concentration & Risk');
+        const band = stats.hhi < 1500 ? 'competitive' : stats.hhi <= 2500 ? 'moderately concentrated' : 'highly concentrated';
+
+        let r = 3;
+        const kv = (label: string, value: string) => {
+            ws.getCell(`A${r}`).value = label;
+            ws.getCell(`A${r}`).font = { size: 10, color: { argb: SUBTLE_TEXT } };
+            const v = ws.getCell(`C${r}`);
+            v.value = value;
+            v.font = { bold: true, size: 12, color: { argb: TITLE_TEXT } };
+            r++;
+        };
+        kv('HHI (vendor concentration)', `${stats.hhi.toFixed(0)} — ${band}`);
+        kv('Top 3 vendor concentration', `${(stats.top3Conc * 100).toFixed(1)}%`);
+        kv('Top 10 vendor concentration', `${(stats.top10Conc * 100).toFixed(1)}%`);
+        kv('Single-source items', `${stats.singleSource.length.toLocaleString('en-IN')}`);
+
+        r += 1;
+        ws.getCell(`A${r}`).value = 'TOP SINGLE-SOURCE ITEMS BY SPEND (dependency risk)';
+        ws.getCell(`A${r}`).font = { bold: true, size: 12, color: { argb: HEADER_FILL } };
+        r++;
+        const hdr = ws.getRow(r);
+        hdr.values = ['Item Code', 'Description', 'Spend (Rs)', '% of Total'];
+        this.styleHeaderRow(hdr); r++;
+        for (const it of stats.singleSource.slice(0, 50)) {
+            const row = ws.getRow(r);
+            row.values = [it.code, it.desc, it.spend, stats.totalBasic ? it.spend / stats.totalBasic : 0];
+            row.getCell(3).numFmt = '#,##0'; row.getCell(4).numFmt = '0.0%';
+            r++;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // SHEET 10 — Cleaned Data (18-column normalised grid)
+    // 03_Spend_by_Category SUMIF depends on this column order: K=Category, O=Basic Amount.
     // -----------------------------------------------------------------------
     private createCleanedData() {
-        const ws = this.wb.addWorksheet('06_Cleaned_Data');
+        const ws = this.wb.addWorksheet(SHEETS.cleaned);
         const cols: Array<{ h: string; w: number; numFmt?: string }> = [
             { h: 'S.No', w: 7 },
             { h: 'MRN No', w: 11 },
