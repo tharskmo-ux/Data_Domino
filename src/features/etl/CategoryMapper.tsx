@@ -2,6 +2,8 @@ import React, { useState, useMemo } from 'react';
 import { Check, AlertTriangle, ArrowRight, Search, Tag, Upload, Sparkles } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { cn } from '../../lib/utils';
+import { categorize } from '../../utils/categorization/categorize';
+import { getClassifier } from '../../utils/categorization/llm';
 
 interface CategoryMapperProps {
     data: any[];
@@ -35,6 +37,37 @@ const CategoryMapper: React.FC<CategoryMapperProps> = ({ data, mappings, onCompl
         activeLevel === 'l3' ? mappings['category_l2'] : undefined;
 
     const descriptionCol = mappings['description'] || mappings['item'] || mappings['material']; // Fallback for context
+
+    // Auto-categorization (HSN -> keyword -> optional AI). Fills empty categories only.
+    const [autoBusy, setAutoBusy] = useState(false);
+    const [autoSummary, setAutoSummary] = useState<string | null>(null);
+
+    const handleAutoCategorize = async () => {
+        setAutoBusy(true);
+        setAutoSummary(null);
+        try {
+            const hsnKey = mappings['hsn_code'] || 'HSN/SAC CODE';
+            const descKey = descriptionCol || 'ITEM DESC.';
+            const results = await categorize(localData, { hsnKey, descKey }, getClassifier());
+
+            const by: Record<string, number> = {};
+            const next = localData.map((row, i) => {
+                const existing = row[categoryCol];
+                // Never overwrite a real (manual) value.
+                if (existing && String(existing).trim() && existing !== 'Uncategorized') return row;
+                const res = results[i];
+                by[res.source] = (by[res.source] || 0) + 1;
+                return { ...row, [categoryCol]: res.category };
+            });
+            setLocalData(next);
+            setAutoSummary(
+                `Auto-categorized — HSN ${by.hsn || 0}, keyword ${by.keyword || 0}, ` +
+                `AI ${by.ai || 0}, review ${by.unmapped || 0}.`,
+            );
+        } finally {
+            setAutoBusy(false);
+        }
+    };
 
     // Statistics
     const stats = useMemo(() => {
@@ -250,6 +283,17 @@ const CategoryMapper: React.FC<CategoryMapperProps> = ({ data, mappings, onCompl
                     </p>
                 </div>
                 <div className="flex items-center gap-4">
+                    <div className="flex flex-col items-end">
+                        <button
+                            onClick={handleAutoCategorize}
+                            disabled={autoBusy}
+                            className="px-4 py-2 rounded-xl bg-primary text-white font-semibold disabled:opacity-50 flex items-center gap-2"
+                        >
+                            <Sparkles className="h-4 w-4" />
+                            {autoBusy ? 'Categorizing…' : 'Auto-categorize'}
+                        </button>
+                        {autoSummary && <p className="text-[11px] text-zinc-400 mt-1 max-w-xs text-right">{autoSummary}</p>}
+                    </div>
                     <div className="px-4 py-2 bg-zinc-900 rounded-xl border border-zinc-800 flex items-center gap-6">
                         <div className="flex flex-col">
                             <div className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest mb-0.5">Categorized Spend</div>
