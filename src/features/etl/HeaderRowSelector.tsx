@@ -6,11 +6,12 @@ import { cn } from '../../lib/utils';
 interface HeaderRowSelectorProps {
     rawData: any[][]; // Array of rows, where each row is an array of cells
     merges?: any[]; // XLSX merges info
+    initialSelectedRow?: number;
     onSelect: (rowIndex: number) => void;
 }
 
-const HeaderRowSelector: React.FC<HeaderRowSelectorProps> = ({ rawData, merges, onSelect }) => {
-    const [selectedRow, setSelectedRow] = useState<number | null>(null);
+const HeaderRowSelector: React.FC<HeaderRowSelectorProps> = ({ rawData, merges, initialSelectedRow, onSelect }) => {
+    const [selectedRow, setSelectedRow] = useState<number | null>(initialSelectedRow !== undefined ? initialSelectedRow : null);
 
     // Common keywords to highlight potential header rows
     const KEYWORDS = ['vendor', 'supplier', 'date', 'amount', 'currency', 'category', 'invoice', 'po', 'item', 'description'];

@@ -3,6 +3,7 @@ import { getAuth } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 import { getStorage } from "firebase/storage";
 import { getAnalytics, isSupported } from "firebase/analytics";
+import { getFunctions } from "firebase/functions";
 
 // Placeholder config - User will need to replace this with actual credentials
 const firebaseConfig = {
@@ -30,6 +31,7 @@ let auth: any;
 let db: any;
 let storage: any;
 let analytics: any;
+let functions: any;
 
 if (!IS_DEMO_MODE) {
     try {
@@ -38,6 +40,7 @@ if (!IS_DEMO_MODE) {
         auth = getAuth(app);
         db = getFirestore(app);
         storage = getStorage(app);
+        functions = getFunctions(app);
         isSupported().then(yes => {
             if (yes) analytics = getAnalytics(app);
         });
@@ -48,5 +51,5 @@ if (!IS_DEMO_MODE) {
     console.warn("[Firebase] Operating in DEMO MODE. No real backend calls will be made.");
 }
 
-export { auth, db, storage, analytics };
+export { auth, db, storage, analytics, functions };
 export default app;

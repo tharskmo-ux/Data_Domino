@@ -12,7 +12,13 @@ interface CategoryMapperProps {
 
 const CategoryMapper: React.FC<CategoryMapperProps> = ({ data, mappings, onComplete, currency = 'INR' }) => {
     const [localData, setLocalData] = useState(data);
-    const [filterMode, setFilterMode] = useState<'all' | 'uncategorized'>('uncategorized');
+    const [filterMode, setFilterMode] = useState<'all' | 'uncategorized'>(() => {
+        // If data is passed in and already has some categories assigned at any level, 
+        // default to 'all' so the user sees their restored work.
+        const categoryCols = Object.keys(mappings).filter(k => k.startsWith('category'));
+        const hasCategories = data.some(row => categoryCols.some(col => row[mappings[col]] && row[mappings[col]] !== 'Uncategorized'));
+        return hasCategories ? 'all' : 'uncategorized';
+    });
     const [searchTerm, setSearchTerm] = useState('');
     const [activeLevel, setActiveLevel] = useState<'l1' | 'l2' | 'l3'>('l1');
     const [applyToSimilar, setApplyToSimilar] = useState(true);

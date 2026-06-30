@@ -12,6 +12,12 @@ dist
 dist-ssr
 *.local
 
+# Build/lint/tsc debug output dumps
+*_errors*.txt
+*_output*.txt
+*_fresh*.txt
+tsc_*.txt
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

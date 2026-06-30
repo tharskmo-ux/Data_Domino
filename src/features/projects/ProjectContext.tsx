@@ -34,7 +34,7 @@ export interface Project {
     };
     activities: {
         id: string;
-        type: 'export' | 'mapping' | 'matching' | 'categorization' | 'upload' | 'header-selection' | 'creation';
+        type: 'export' | 'mapping' | 'matching' | 'categorization' | 'upload' | 'header-selection' | 'creation' | 'ai_insight';
         label: string;
         timestamp: string;
         details?: string;
@@ -56,6 +56,7 @@ export interface Project {
     latestAnalysis?: any;
     rawGridUrl?: string;
     categoryResultsUrl?: string;
+    normalizationSummary?: any;
     finalizedAt?: string;
 }
 
@@ -142,6 +143,7 @@ export const normalizeProject = (data: any, projectUuid: string): Project => {
         latestAnalysis: data.latestAnalysis || null,
         rawGridUrl: data.rawGridUrl || null,
         categoryResultsUrl: data.categoryResultsUrl || null,
+        normalizationSummary: data.normalizationSummary || la.normalizationSummary || null,
         finalizedAt: normalizeDate(data.finalizedAt)
     };
 };

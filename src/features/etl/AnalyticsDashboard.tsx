@@ -45,6 +45,8 @@ import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
 import { db, storage } from '../../lib/firebase';
 import { getAutoMappings } from '../../utils/columnDetection';
+import { getAIInsights } from '../../services/aiService';
+import type { AIResponse } from '../../services/aiService';
 
 interface AnalyticsDashboardProps {
     data: any[];
@@ -138,6 +140,37 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
     const [expandedCards, setExpandedCards] = useState<Set<string>>(new Set());
     const [clickTimeout, setClickTimeout] = useState<any>(null);
     const historyRef = React.useRef<HTMLDivElement>(null);
+
+    // AI Insights State
+    const [aiInsights, setAiInsights] = useState<AIResponse | null>(null);
+    const [isAILoading, setIsAILoading] = useState(false);
+
+    const handleGetAIInsights = async () => {
+        if (!dynamicStats) return;
+        setIsAILoading(true);
+        try {
+            // Prepare a lightweight summary for the AI
+            const summary = {
+                totalSpend: dynamicStats.totalSpend,
+                vendorCount: dynamicStats.vendorCount,
+                topCategories: dynamicStats.buData, // Using BU as category proxy if needed
+                savingsPotential: dynamicStats.opportunityRanking?.[0]?.value || 0,
+                currency: currency
+            };
+            const response = await getAIInsights(summary);
+            setAiInsights(response);
+            addActivity(currentProject?.id || '', {
+                type: 'ai_insight',
+                label: 'AI Spend Analysis',
+                details: 'Generated automated spend insights using Gemini 1.5 Flash.',
+            });
+        } catch (error) {
+            console.error('AI Insights failed:', error);
+            alert('Failed to generate AI insights. Please check your connection or try again.');
+        } finally {
+            setIsAILoading(false);
+        }
+    };
 
     // Close History Dropdown on Outside Click
     useEffect(() => {
@@ -1422,6 +1455,61 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                 animate={{ opacity: 1, scale: 1 }}
                 className="space-y-10 pb-32"
             >
+                {aiInsights && (
+                    <motion.div
+                        initial={{ opacity: 0, y: 20 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="bg-zinc-900/50 border border-primary/20 rounded-3xl p-8 backdrop-blur-xl relative overflow-hidden group"
+                    >
+                        <div className="absolute top-0 right-0 p-8 opacity-10 group-hover:opacity-20 transition-opacity">
+                            <Zap className="h-32 w-32 text-primary" />
+                        </div>
+                        
+                        <div className="relative z-10">
+                            <div className="flex items-center gap-3 mb-6">
+                                <div className="p-2 bg-primary/20 rounded-lg">
+                                    <Zap className="h-5 w-5 text-primary fill-current" />
+                                </div>
+                                <h2 className="text-2xl font-bold text-white tracking-tight">Gemini AI Intelligence</h2>
+                                <button 
+                                    onClick={() => setAiInsights(null)}
+                                    className="ml-auto text-zinc-500 hover:text-white transition-colors text-sm font-medium"
+                                >
+                                    Dismiss
+                                </button>
+                            </div>
+
+                            <p className="text-zinc-400 text-lg leading-relaxed mb-8 max-w-3xl">
+                                {aiInsights.summary}
+                            </p>
+
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                                {aiInsights.insights.map((insight, idx) => (
+                                    <motion.div
+                                        key={idx}
+                                        initial={{ opacity: 0, x: -20 }}
+                                        animate={{ opacity: 1, x: 0 }}
+                                        transition={{ delay: idx * 0.1 }}
+                                        className="bg-zinc-950/50 border border-zinc-800 p-6 rounded-2xl hover:border-primary/30 transition-all"
+                                    >
+                                        <div className="flex items-center justify-between mb-3">
+                                            <span className={cn(
+                                                "text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full border",
+                                                insight.impact === 'High' ? "text-rose-400 border-rose-400/20 bg-rose-400/10" :
+                                                insight.impact === 'Medium' ? "text-amber-400 border-amber-400/20 bg-amber-400/10" :
+                                                "text-emerald-400 border-emerald-400/20 bg-emerald-400/10"
+                                            )}>
+                                                {insight.impact} Impact
+                                            </span>
+                                        </div>
+                                        <h3 className="text-white font-bold mb-2">{insight.title}</h3>
+                                        <p className="text-zinc-500 text-sm leading-snug">{insight.description}</p>
+                                    </motion.div>
+                                ))}
+                            </div>
+                        </div>
+                    </motion.div>
+                )}
                 <div className="flex flex-col md:flex-row md:items-end justify-between gap-8 shrink-0 border-b border-zinc-900 pb-8">
                     <div>
                         <div className="flex items-center gap-3 mb-4">
@@ -1471,6 +1559,22 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                         title="Share Tool / Invite Collaborators"
                     >
                         <Mail className="h-4 w-4" /> Share
+                    </button>
+
+                    <button
+                        onClick={handleGetAIInsights}
+                        disabled={isAILoading || isLoading}
+                        className={cn(
+                            "px-5 py-3 rounded-2xl font-bold flex items-center gap-2 transition-all border active:scale-[0.98]",
+                            isAILoading ? "bg-primary/20 text-primary border-primary/30" : "bg-primary text-white border-primary hover:bg-primary/90"
+                        )}
+                    >
+                        {isAILoading ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                            <Zap className="h-4 w-4 fill-current" />
+                        )}
+                        {isAILoading ? "Gemini Analysis..." : "AI Insights"}
                     </button>
 
                     <div className="relative" ref={historyRef}>
@@ -1947,7 +2051,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                                             onMouseLeave={() => setHoveredSpendType(null)}
                                                             className="cursor-pointer focus:outline-none"
                                                         >
-                                                            {dynamicStats.spendTypeData.map((entry, index) => (
+                                                            {dynamicStats.spendTypeData.map((entry: any, index: number) => (
                                                                 <Cell
                                                                     key={`cell - ${index} `}
                                                                     fill={entry.color}
@@ -1965,7 +2069,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                                 </ResponsiveContainer>
                                                 <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
                                                     <span className="text-3xl font-black text-white">
-                                                        {activeSpendType ? dynamicStats.spendTypeData.find(s => s.name === activeSpendType)?.value : '100'}%
+                                                        {activeSpendType ? dynamicStats.spendTypeData.find((s: any) => s.name === activeSpendType)?.value : '100'}%
                                                     </span>
                                                     <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-[0.2em]">
                                                         {hoveredSpendType || activeSpendType ? `${hoveredSpendType || activeSpendType} Cost` : 'Total Spend'}
@@ -1975,9 +2079,9 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
 
                                             <div className="space-y-4 overflow-y-auto max-h-[300px] pr-2">
                                                 {dynamicStats.categoryData
-                                                    .filter(c => !activeSpendType || c.type === activeSpendType)
+                                                    .filter((c: any) => !activeSpendType || c.type === activeSpendType)
                                                     .slice(0, 6)
-                                                    .map((cat) => (
+                                                    .map((cat: any) => (
                                                         <div key={cat.name} className="grid grid-cols-[1fr_80px_40px] items-center gap-3 group cursor-default">
                                                             <div className="flex items-center gap-3 overflow-hidden">
                                                                 <div className="h-2.5 w-2.5 rounded-full shrink-0 shadow-lg" style={{ backgroundColor: cat.color, boxShadow: `0 0 10px ${cat.color} 66` }} />
@@ -2052,7 +2156,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                             </tr>
                                         </thead>
                                         <tbody>
-                                            {filteredClusters.map((s, i) => (
+                                            {filteredClusters.map((s: any, i: number) => (
                                                 <tr key={i} className="border-b border-zinc-900 hover:bg-zinc-800/20 transition-colors group">
                                                     <td className="p-6 font-bold text-sm text-white">{s.masterName}</td>
                                                     <td className="p-6">
@@ -2188,7 +2292,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                     </div>
 
                                     <div className="grid grid-cols-1 gap-4">
-                                        {dynamicStats.opportunityRanking.map((opp, idx) => (
+                                        {dynamicStats.opportunityRanking.map((opp: any, idx: number) => (
                                             <div
                                                 key={opp.id}
                                                 className={cn(
@@ -2226,7 +2330,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                                         <div>
                                                             <h6 className="text-[10px] font-black text-zinc-500 uppercase tracking-widest mb-3">Top Impact Categories</h6>
                                                             <div className="flex flex-wrap gap-2">
-                                                                {opp.categories.map(c => (
+                                                                {opp.categories.map((c: string) => (
                                                                     <span key={c} className="bg-zinc-950 border border-zinc-800 text-zinc-400 px-3 py-1 rounded-full text-[10px] font-bold">
                                                                         {c}
                                                                     </span>
@@ -2244,7 +2348,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                                         <div>
                                                             <h6 className="text-[10px] font-black text-zinc-500 uppercase tracking-widest mb-3">Current Vendor Concentration</h6>
                                                             <div className="space-y-3">
-                                                                {opp.topVendors.map(v => (
+                                                                {opp.topVendors.map((v: any) => (
                                                                     <div key={v.name} className="flex justify-between items-center text-[10px]">
                                                                         <span className="text-zinc-400 font-bold max-w-[150px] truncate">{v.name}</span>
                                                                         <span className="text-zinc-500">{formatCurrency(v.spend)}</span>
@@ -2299,7 +2403,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                     )}>
                                         <h3 className="text-xl font-bold mb-8 uppercase tracking-widest text-zinc-400">Strategic Levers</h3>
                                         <div className="space-y-6">
-                                            {dynamicStats.savingsLevers.slice(0, 5).map((lever) => (
+                                            {dynamicStats.savingsLevers.slice(0, 5).map((lever: any) => (
                                                 <div key={lever.name} className="space-y-3">
                                                     <div className="flex justify-between text-[10px] font-black uppercase tracking-widest">
                                                         <span className="text-zinc-500">{lever.name}</span>
@@ -2350,10 +2454,10 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                                 paddingAngle={5}
                                                 dataKey="value"
                                                 stroke="none"
-                                                onClick={(data) => setActiveSpendType(activeSpendType === data.name ? null : data.name as any)}
+                                                onClick={(data: any) => setActiveSpendType(activeSpendType === data.name ? null : data.name as any)}
                                                 className="cursor-pointer focus:outline-none"
                                             >
-                                                {dynamicStats.spendTypeData.map((entry, index) => (
+                                                {dynamicStats.spendTypeData.map((entry: any, index: number) => (
                                                     <Cell
                                                         key={`cell-${index}`}
                                                         fill={entry.color}
@@ -2371,7 +2475,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                     </ResponsiveContainer>
                                     <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
                                         <span className="text-5xl font-black text-white">
-                                            {activeSpendType ? dynamicStats.spendTypeData.find(s => s.name === activeSpendType)?.value : '100'}%
+                                            {activeSpendType ? dynamicStats.spendTypeData.find((s: any) => s.name === activeSpendType)?.value : '100'}%
                                         </span>
                                         <span className="text-sm font-bold text-zinc-500 uppercase tracking-[0.2em] mt-2">
                                             {hoveredSpendType || activeSpendType ? `${hoveredSpendType || activeSpendType} Cost` : 'Total Analyzed'}
@@ -2382,9 +2486,9 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                 <div className="space-y-6">
                                     <h4 className="text-lg font-bold text-white mb-6 border-b border-zinc-800 pb-2">Top Categories {activeSpendType && `(${activeSpendType})`}</h4>
                                     {dynamicStats.categoryData
-                                        .filter(c => !activeSpendType || c.type === activeSpendType)
+                                        .filter((c: any) => !activeSpendType || c.type === activeSpendType)
                                         .slice(0, 8)
-                                        .map((cat) => (
+                                        .map((cat: any) => (
                                             <div key={cat.name} className="grid grid-cols-[1fr_100px_60px] items-center gap-4 group cursor-default">
                                                 <div className="flex items-center gap-4 overflow-hidden">
                                                     <div className="h-3 w-3 rounded-full shrink-0 shadow-lg" style={{ backgroundColor: cat.color, boxShadow: `0 0 10px ${cat.color}66` }} />

@@ -28,10 +28,15 @@ interface SupplierMatchingProps {
     onComplete: (clusters: SupplierGroup[]) => void;
     data: any[];
     mappings: Record<string, string>;
+    initialClusters?: SupplierGroup[];
 }
 
-const SupplierMatching: React.FC<SupplierMatchingProps> = ({ onComplete, data, mappings }) => {
+const SupplierMatching: React.FC<SupplierMatchingProps> = ({ onComplete, data, mappings, initialClusters }) => {
     const [groups, setGroups] = useState<SupplierGroup[]>(() => {
+        if (initialClusters && initialClusters.length > 0) {
+            return initialClusters;
+        }
+
         const supplierCol = mappings['supplier'];
         const amountCol = mappings['amount'];
 

@@ -348,19 +348,28 @@ const ProjectView: React.FC = () => {
 
                 // Restore Pipeline Stats & Data — only fill gaps, never overwrite live session data
                 setProjectData(prev => {
-                    // CRITICAL-02: If we already have raw data from an active pipeline session, DO NOT overwrite
-                    const hasLiveSession = prev.raw && prev.raw.length > 0;
-                    if (hasLiveSession) {
-                        console.log('[ProjectView] onSnapshot setProjectData: skipping — live session has', prev.raw.length, 'rows');
-                        return prev;
+                    // CRITICAL-02: Only protect 'raw' if we already have a larger dataset 
+                    // (e.g. from Auto-Restore or active work). Metadata must ALWAYS sync.
+                    const knownRowCount = normalized.rowCount || 0;
+                    const hasFullData = prev.raw && prev.raw.length > 0 && (knownRowCount === 0 || prev.raw.length >= knownRowCount);
+
+                    if (hasFullData) {
+                        console.log('[ProjectView] onSnapshot: updating metadata only (raw data preserved)');
+                        return {
+                            ...prev,
+                            headers: normalized.detectedHeaders ?? prev.headers,
+                            mappings: normalized.columnMapping ?? prev.mappings,
+                            currency: normalized.currency || 'INR',
+                            clusters: normalized.supplierMatches ?? prev.clusters,
+                            rawGridUrl: normalized.rawGridUrl || prev.rawGridUrl,
+                            merges: normalized.merges || prev.merges,
+                            normalizationSummary: normalized.normalizationSummary || prev.normalizationSummary,
+                        };
                     }
 
-                    // FIX: Always populate raw from Firestore preview (rawGrid) as a fallback.
-                    // The auto-restore useEffect will overwrite with the full dataset from
-                    // categoryResultsUrl if available — but we no longer leave raw=[] which
-                    // caused data loss when the Storage fetch failed.
-                    const fallbackRaw = normalized.rawGrid ?? prev.raw;
-                    console.log('[ProjectView] onSnapshot setProjectData: restoring', fallbackRaw.length, 'rows from Firestore preview');
+                    // Fallback: Populate raw from Firestore preview (rawGrid) if we don't have full data yet.
+                    const fallbackRaw = normalized.rawGrid && normalized.rawGrid.length > 0 ? normalized.rawGrid : prev.raw;
+                    console.log('[ProjectView] onSnapshot: restoring metadata and raw preview (', fallbackRaw.length, 'rows)');
 
                     return {
                         ...prev,
@@ -370,6 +379,8 @@ const ProjectView: React.FC = () => {
                         currency: normalized.currency || 'INR',
                         clusters: normalized.supplierMatches ?? prev.clusters,
                         rawGridUrl: normalized.rawGridUrl || prev.rawGridUrl,
+                        merges: normalized.merges || prev.merges,
+                        normalizationSummary: normalized.normalizationSummary || prev.normalizationSummary,
                         fileMeta: prev.fileMeta ?? {
                             name: normalized.fileName,
                             rows: normalized.rowCount ?? (normalized.stats?.transactions || 0),
@@ -417,15 +428,6 @@ const ProjectView: React.FC = () => {
                 setIsRestoring(false);
                 setInitialLoadDone(true);
 
-                // Recover raw grid JSON from Storage in the background (for the data-grid view).
-                // This is fire-and-forget — it does NOT block setInitialLoadDone.
-                if (project.rawGridUrl) {
-                    fetch(project.rawGridUrl as string)
-                        .then(r => r.json())
-                        .then((grid: any) => setProjectData(prev => ({ ...prev, rawSheetData: grid })))
-                        .catch((err: any) => console.error('[Grid Recovery] Failed to fetch raw grid:', err));
-                }
-
                 return;
             }
             setIsRestoring(false);
@@ -445,17 +447,20 @@ const ProjectView: React.FC = () => {
     // Firebase Storage (categoryResultsUrl) to ensure 100% data parity between user and admin views.
     // This overrides the 100-row Firestore preview (rawGrid) that onSnapshot may have loaded.
     useEffect(() => {
+        const stepNum = Number(currentProject?.currentStep || 0);
         const catUrl = currentProject?.categoryResultsUrl;
-        // Include every terminal status — 'categorization_complete' is the status that
-        // handleCategoryComplete writes, so it must be here or AUTO-RESTORE never fires.
-        const projectIsComplete =
+        // Include projects that are in Matching (3), Categorization (4), or Data Quality (5)
+        const projectNeedsFullData =
+            stepNum >= 3 ||
+            currentProject?.status === 'mapping_complete' ||
+            currentProject?.status === 'matching_complete' ||
             currentProject?.status === 'categorization_complete' ||
             currentProject?.status === 'data_quality_complete' ||
             currentProject?.status === 'completed';
         const la = currentProject?.latestAnalysis;
 
-        // Only run when the project is complete and we have finished the initial load
-        if (!projectIsComplete || !initialLoadDone) return;
+        // Only run when the project needs full data and we have finished the initial load
+        if (!projectNeedsFullData || !initialLoadDone) return;
 
         // If we already have full data from an active pipeline session (more rows than the rowCount
         // stored in Firestore), skip — user just finished the pipeline in this session.
@@ -508,6 +513,34 @@ const ProjectView: React.FC = () => {
         })();
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [currentProject?.status, currentProject?.id, initialLoadDone]);
+
+    // GRID RESTORE: Recover original spreadsheet raw grid (rawGridUrl) in the background.
+    // This is used for "Header Selection" step to avoid re-uploading the file.
+    useEffect(() => {
+        const url = currentProject?.rawGridUrl;
+        const pid = currentProject?.id;
+        if (!url || !pid) return;
+
+        // Skip if we already have it in memory
+        if (projectData.rawSheetData && projectData.rawSheetData.length > 0) return;
+
+        let active = true;
+        console.log('[Grid Restore] Fetching background grid for', pid);
+
+        fetch(url)
+            .then(r => r.json())
+            .then(grid => {
+                if (active) {
+                    console.log('[Grid Restore] Successfully restored', grid.length, 'rows of raw grid data');
+                    setProjectData(prev => ({ ...prev, rawSheetData: grid }));
+                }
+            })
+            .catch(err => {
+                if (active) console.error('[Grid Restore] Failed:', err);
+            });
+
+        return () => { active = false; };
+    }, [currentProject?.rawGridUrl, currentProject?.id]);
 
     const handleUploadComplete = (data: any[], metadata: FileMetadata, rawSheetData: any[][], merges: any[], worksheet: any, rawFile?: File) => {
         setIsProcessing(true);
@@ -683,6 +716,7 @@ const ProjectView: React.FC = () => {
                     await updateDoc(projectRef, {
                         selectedHeaderRow: rowIndex,
                         detectedHeaders: cleanHeaders,
+                        normalizationSummary,
                         status: 'header_selected',
                         currentStep: 2,
                         updatedAt: serverTimestamp(),
@@ -723,6 +757,7 @@ const ProjectView: React.FC = () => {
                     const projectRef = doc(db, 'projects', `${effectiveUid}_${currentProject.id}`);
                     await updateDoc(projectRef, {
                         columnMapping: mappings,
+                        currency: globalCurrency,
                         status: 'mapping_complete',
                         currentStep: 3,
                         updatedAt: serverTimestamp(),
@@ -1131,7 +1166,7 @@ const ProjectView: React.FC = () => {
                     { name: 'Indirect', value: Math.round((indirectSpendSave / (totalSpendVal || 1)) * 100), color: '#f43f5e' }
                 ].filter(i => i.value > 0);
                 // Deterministic palette so colours are stable across sessions
-                const CAT_PALETTE = ['#22d3ee','#d946ef','#f59e0b','#10b981','#6366f1','#f43f5e','#14b8a6','#8b5cf6','#ec4899','#84cc16','#0ea5e9','#a78bfa','#fb923c','#4ade80','#e879f9'];
+                const CAT_PALETTE = ['#22d3ee', '#d946ef', '#f59e0b', '#10b981', '#6366f1', '#f43f5e', '#14b8a6', '#8b5cf6', '#ec4899', '#84cc16', '#0ea5e9', '#a78bfa', '#fb923c', '#4ade80', '#e879f9'];
                 const topCategoryDataSave = Object.entries(catMapSave)
                     .sort((a, b) => b[1] - a[1])
                     .slice(0, 15)
@@ -1717,7 +1752,11 @@ const ProjectView: React.FC = () => {
                             {activeStep === 'mapping' && <ColumnMapper onConfirm={handleMappingComplete} headers={projectData.headers} initialMappings={projectData.mappings} />}
                             {activeStep === 'header-selection' && (
                                 projectData.rawSheetData && projectData.rawSheetData.length > 0 ? (
-                                    <HeaderRowSelector rawData={projectData.rawSheetData} merges={projectData.merges} onSelect={handleHeaderRowSelection} />
+                                    <HeaderRowSelector rawData={projectData.rawSheetData} merges={projectData.merges} initialSelectedRow={currentProject?.selectedHeaderRow} onSelect={handleHeaderRowSelection} />
+                                ) : (projectData.raw && projectData.raw.length > 0) ? (
+                                    /* FALLBACK: If we have processed data but not the original original grid, 
+                                       construct a shim so the user doesn't see an error if they just "visit" Step 1 */
+                                    <HeaderRowSelector rawData={projectData.raw.slice(0, 15).map(r => Object.values(r))} merges={projectData.merges} initialSelectedRow={currentProject?.selectedHeaderRow} onSelect={handleHeaderRowSelection} />
                                 ) : (currentProject?.rawGridUrl || isRestoring) ? (
                                     <div className="flex flex-col items-center justify-center h-[60vh] space-y-8 animate-in fade-in duration-500">
                                         <div className="relative">
@@ -1764,7 +1803,7 @@ const ProjectView: React.FC = () => {
                                     </div>
                                 )
                             )}
-                            {activeStep === 'matching' && <SupplierMatching onComplete={handleMatchingComplete} data={projectData.raw} mappings={projectData.mappings} />}
+                            {activeStep === 'matching' && <SupplierMatching onComplete={handleMatchingComplete} data={projectData.raw} mappings={projectData.mappings} initialClusters={projectData.clusters} />}
                             {activeStep === 'categorization' && <CategoryMapper data={projectData.raw} mappings={projectData.mappings} onComplete={handleCategoryComplete} currency={projectData.currency} />}
                             {activeStep === 'history' && <ActivityHistory projectId={currentProject?.id || ''} />}
                         </div>
