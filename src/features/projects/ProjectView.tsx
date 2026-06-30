@@ -32,7 +32,8 @@ import {
     onSnapshot,
 } from 'firebase/firestore';
 import { db, storage, IS_DEMO_MODE } from '../../lib/firebase';
-import { detectMappings } from '../../utils/columnDetection';
+import { detectMappings, getAutoMappings } from '../../utils/columnDetection';
+import { ExcelGenerator } from '../../utils/ExcelGenerator';
 import { useEffectiveUid } from '../../hooks/useEffectiveUid';
 import { useAdminView } from '../admin/AdminViewContext';
 
@@ -1352,12 +1353,12 @@ const ProjectView: React.FC = () => {
         // CRITICAL-03 FIX: Guard against !effectiveUid instead of !user
         if (!pd || pd.raw.length === 0 || !effectiveUid) return;
         try {
-            const wb = XLSX.utils.book_new();
-            const ws = XLSX.utils.json_to_sheet(pd.raw);
-            XLSX.utils.book_append_sheet(wb, ws, 'Data Domino Export');
-            const wbArrayBuffer = XLSX.write(wb, { bookType: 'xlsx', type: 'array' }) as ArrayBuffer;
-            const blob = new Blob([wbArrayBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-            const fileName = `${currentProject?.name ?? 'export'}_${Date.now()}.xlsx`;
+            // Produce the full 11-sheet analyst report (not a raw dump). Smart auto-
+            // detection resolves the columns even if the mapping step was light.
+            const resolvedMappings = getAutoMappings(pd.raw, pd.mappings || {});
+            const generator = new ExcelGenerator(pd.raw, resolvedMappings, pd.currency || 'INR');
+            const blob = await generator.generate();
+            const fileName = `DataDomino_${(currentProject?.name ?? 'Analysis').replace(/\s+/g, '_')}_${Date.now()}.xlsx`;
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
