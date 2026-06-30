@@ -1,17 +1,19 @@
 /**
- * ExcelGenerator — Enterprise Procurement Spend Analysis Export
+ * ExcelGenerator — Procurement Spend Analysis Export
  *
- * Tab structure (star-schema layout):
- *   0_Documentation   — data dictionary, assumptions, refresh date
- *   1_Fact_Spend      — one row per transaction (the master fact table)
- *   2_Dim_Supplier    — one row per unique supplier with enriched attributes
- *   3_Dim_Category    — category hierarchy L1 → L2 → L3 with strategy tags
- *   4_Dim_Org         — organisational hierarchy (BU / plant / region / CC)
- *   5_Dim_Date        — calendar table (date / month / quarter / year / fiscal)
- *   6_KPI_Export      — pre-aggregated KPIs by period × category × BU
- *   7_Data_Quality    — field-level completeness audit
+ * Tab structure (analyst report layout — matches client deliverable template):
+ *   00_README                — what the workbook contains + methodology notes
+ *   01_Executive_Summary     — headline KPI tiles + savings headline
+ *   02_Spend_by_Category     — category spend table (live SUMIF off 06_Cleaned_Data)
+ *   03_Spend_by_Vendor       — ranked vendor spend with Pareto cumulative %
+ *   04_MultiVendor_Benchmark — items bought from 2+ vendors, rate gap + saving
+ *   05_Savings_Opportunities — quantified + structural levers (analyst-tunable)
+ *   06_Cleaned_Data          — the normalised transaction grid (18-col layout)
  *
- * Library: ExcelJS  (already a project dependency)
+ * Library: ExcelJS (already a project dependency)
+ *
+ * Drop-in: same public surface as before —
+ *   new ExcelGenerator(data, mappings, currency).generate(): Promise<Blob>
  */
 
 import ExcelJS from 'exceljs';
@@ -24,71 +26,59 @@ interface DataRow {
     [key: string]: any;
 }
 
-/** Resolved column-name mappings coming out of the ETL column-mapper step */
+/** Resolved column-name mappings coming out of the ETL column-mapper step. */
 interface Mappings {
-    // financial
     amount?: string;
     invoice_amount?: string;
     currency?: string;
     quantity?: string;
     unit_price?: string;
-    payment_terms?: string;
+    net_rate?: string;
 
-    // supplier
     supplier?: string;
     vendor?: string;
 
-    // category
     category_l1?: string;
-    category_l2?: string;
-    category_l3?: string;
     category?: string;
 
-    // org
-    company_code?: string;
-    business_unit?: string;
-    plant?: string;
-    location?: string;
     department?: string;
-    cost_center?: string;
-    region?: string;
+    state?: string;
 
-    // date
     date?: string;
     invoice_date?: string;
     po_date?: string;
-    posting_date?: string;
+    mrn_date?: string;
 
-    // document IDs
     document_number?: string;
     po_number?: string;
     invoice_number?: string;
-    contract_ref?: string;
+    mrn_number?: string;
+    bill_number?: string;
+    item_code?: string;
     item_description?: string;
+    hsn_code?: string;
+    uom?: string;
+    freight?: string;
+    gross_amount?: string;
 
     [key: string]: string | undefined;
 }
 
 // ---------------------------------------------------------------------------
-// Colour / font constants
+// Colour constants (aligned to the client template)
 // ---------------------------------------------------------------------------
 
-const BRAND_BLUE    = '1E3A5F';   // deep navy — header backgrounds
-const ACCENT_BLUE   = '2F80ED';   // mid blue — section titles
-const LIGHT_BLUE    = 'D6E4F7';   // very light — alternating fact rows
-const HEADER_WHITE  = 'FFFFFF';
-// const DARK_TEXT  = '1A1A2E';  // reserved for future use
-const MID_GRAY      = '6B7280';
-const LIGHT_GRAY    = 'F3F4F6';
-const GREEN_OK      = '00875A';
-const AMBER_WARN    = 'F59E0B';
-const RED_CRIT      = 'DC2626';
-const GOLD_HIGH     = 'FEF3C7';   // high-concentration row highlight
-const GREEN_TOP     = 'D1FAE5';   // top-10 vendor row highlight
+const HEADER_FILL = '2E5496';   // dark blue — column-header backgrounds
+const HEADER_TEXT = 'FFFFFF';
+const TILE_FILL    = 'F2F2F2';  // light grey — KPI tiles
+const TITLE_TEXT   = '1F3864';  // navy — sheet titles
+const TOTAL_FILL   = 'D9E1F2';  // light blue — total rows
+const SUBTLE_TEXT  = '666666';
 
 // ---------------------------------------------------------------------------
-// Helper: parse a raw cell value into a JS number (amount)
+// Helpers
 // ---------------------------------------------------------------------------
+
 function parseAmount(val: any): number {
     if (val === null || val === undefined || val === '') return 0;
     if (typeof val === 'number') return isNaN(val) ? 0 : val;
@@ -96,12 +86,8 @@ function parseAmount(val: any): number {
     return parseFloat(s) || 0;
 }
 
-// ---------------------------------------------------------------------------
-// Helper: parse a raw cell into a JS Date (or null)
-// ---------------------------------------------------------------------------
 function parseDate(val: any): Date | null {
-    if (!val) return null;
-    // Excel serial number (days since 1899-12-30)
+    if (!val && val !== 0) return null;
     if (typeof val === 'number' && val > 25569) {
         return new Date((val - 25569) * 86400 * 1000);
     }
@@ -110,59 +96,27 @@ function parseDate(val: any): Date | null {
     return isNaN(d.getTime()) ? null : d;
 }
 
-// ---------------------------------------------------------------------------
-// Helper: safe string
-// ---------------------------------------------------------------------------
 function str(val: any, fallback = ''): string {
     if (val === null || val === undefined) return fallback;
     return String(val).trim() || fallback;
 }
 
-// ---------------------------------------------------------------------------
-// Helper: fiscal period (simple April-start fiscal year, customisable)
-// ---------------------------------------------------------------------------
-function fiscalPeriod(d: Date): { fiscalYear: string; fiscalPeriod: string } {
-    const m = d.getMonth(); // 0-based
-    const y = d.getFullYear();
-    // April start: months 3-11 are FY+1; months 0-2 are FY
-    const fy = m >= 3 ? y + 1 : y;
-    const fp = ((m - 3 + 12) % 12) + 1; // period 1 = April
-    return { fiscalYear: `FY${fy}`, fiscalPeriod: `P${String(fp).padStart(2, '0')}` };
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+/** Format a date as the template's dd-mmm-yy, e.g. 03-Apr-25. */
+function fmtDate(d: Date | null): string {
+    if (!d) return '';
+    const dd = String(d.getDate()).padStart(2, '0');
+    return `${dd}-${MONTHS[d.getMonth()]}-${String(d.getFullYear()).slice(-2)}`;
 }
 
-// ---------------------------------------------------------------------------
-// Helper: ABC classification (A = top 70%, B = next 20%, C = tail 10%)
-// ---------------------------------------------------------------------------
-function buildAbcMap(data: DataRow[], amountKey: string, supplierKey: string)
-    : Map<string, 'A' | 'B' | 'C'> {
-    const spendMap = new Map<string, number>();
-    for (const row of data) {
-        const s = str(row[supplierKey], 'Unknown');
-        spendMap.set(s, (spendMap.get(s) ?? 0) + parseAmount(row[amountKey]));
+/** Pick the first key that actually exists on a sample row, else the supplied fallback. */
+function resolveKey(sample: DataRow | undefined, candidates: (string | undefined)[], fallback: string): string {
+    if (sample) {
+        for (const c of candidates) {
+            if (c && Object.prototype.hasOwnProperty.call(sample, c)) return c;
+        }
     }
-    const sorted = [...spendMap.entries()].sort((a, b) => b[1] - a[1]);
-    const total  = sorted.reduce((acc, [, v]) => acc + v, 0);
-    let cumul    = 0;
-    const abc    = new Map<string, 'A' | 'B' | 'C'>();
-    for (const [name, spend] of sorted) {
-        cumul += spend;
-        const pct = total > 0 ? cumul / total : 0;
-        abc.set(name, pct <= 0.70 ? 'A' : pct <= 0.90 ? 'B' : 'C');
-    }
-    return abc;
-}
-
-// ---------------------------------------------------------------------------
-// Helper: maverick/tail detection
-// ---------------------------------------------------------------------------
-function isMaverick(row: DataRow, contractKey: string | undefined): boolean {
-    if (!contractKey) return false;
-    const v = str(row[contractKey]);
-    return v === '' || v.toLowerCase() === 'none' || v.toLowerCase() === 'n/a';
-}
-
-function isTailSpend(spend: number, avgSpend: number): boolean {
-    return spend > 0 && spend < avgSpend * 0.05;
+    return candidates.find(Boolean) ?? fallback;
 }
 
 // ===========================================================================
@@ -170,74 +124,59 @@ function isTailSpend(spend: number, avgSpend: number): boolean {
 // ===========================================================================
 
 export class ExcelGenerator {
-    private wb:   ExcelJS.Workbook;
+    private wb: ExcelJS.Workbook;
     private data: DataRow[];
-    private m:    Mappings;
-    private cur:  string;   // currency code e.g. 'INR'
-    private sym:  string;   // currency symbol e.g. '₹'
+    private m: Mappings;
 
-    // resolved column keys (set once in constructor)
-    private amtKey:  string;
-    private supKey:  string;
-    private catL1Key: string;
-    private catL2Key: string;
-    private catL3Key: string;
-    private dateKey: string;
-    private curKey:  string;
-    private qtyKey:  string;
-    private upKey:   string;
-    private ptKey:   string;
-    private buKey:   string;
-    private plantKey: string;
-    private deptKey: string;
-    private ccKey:   string;
-    private regionKey: string;
-    private coKey:   string;
-    private docKey:  string;
-    private poKey:   string;
-    // private invKey:  string;  // invoice number — reserved, not yet mapped to a column
-    private ctrKey:  string;
-    private descKey: string;
+    // resolved column keys
+    private amtKey: string;     // BASIC AMOUNT (pre-tax spend)
+    private supKey: string;     // PARTY NAME / vendor
+    private catKey: string;     // Category
+    private dateKey: string;    // MRN DATE
+    private qtyKey: string;     // QTY RCVD
+    private rateKey: string;    // NET RATE
+    private itemKey: string;    // ITEM CODE
+    private descKey: string;    // ITEM DESC
+    private hsnKey: string;     // HSN/SAC
+    private uomKey: string;     // UOM
+    private freightKey: string; // FREIGHT
+    private grossKey: string;   // GROSS (incl tax)
+    private stateKey: string;   // STATE CODE/NAME
+    private deptKey: string;    // DEPARTMENT
+    private mrnNoKey: string;   // MRN NO
+    private billNoKey: string;  // BILL NO
+    private poNoKey: string;    // PO NO
 
-    constructor(data: DataRow[], mappings: Mappings, currency = 'INR') {
-        this.wb   = new ExcelJS.Workbook();
-        this.data = data;
-        this.m    = mappings ?? {};
-        this.cur  = currency || 'INR';
+    constructor(data: DataRow[], mappings: Mappings, _currency = 'INR') {
+        this.wb = new ExcelJS.Workbook();
+        this.data = data ?? [];
+        this.m = mappings ?? {};
 
-        const symMap: Record<string, string> = {
-            USD: '$', INR: '₹', EUR: '€', GBP: '£', JPY: '¥',
-            AUD: 'A$', CAD: 'C$', SGD: 'S$', AED: 'د.إ', CHF: 'Fr'
-        };
-        this.sym = symMap[this.cur] ?? this.cur;
+        const s = this.data[0];
+        // Resolve once, with fallbacks to the common raw ERP header names so the
+        // generator still works even when the mapping step skipped a column.
+        this.amtKey     = resolveKey(s, [this.m.amount, this.m.invoice_amount, 'BASIC AMOUNT', 'Basic Amount'], 'Amount');
+        this.supKey     = resolveKey(s, [this.m.supplier, this.m.vendor, 'PARTY NAME', 'Vendor'], 'Vendor');
+        this.catKey     = resolveKey(s, [this.m.category_l1, this.m.category, 'Category', 'CATEGORY'], 'Category');
+        this.dateKey    = resolveKey(s, [this.m.date, this.m.mrn_date, this.m.invoice_date, this.m.po_date, 'MRN DATE'], 'Date');
+        this.qtyKey     = resolveKey(s, [this.m.quantity, 'QTY RCVD.', 'QTY RCVD', 'Qty'], 'Qty');
+        this.rateKey    = resolveKey(s, [this.m.net_rate, this.m.unit_price, 'NET RATE', 'Net Rate'], 'Net Rate');
+        this.itemKey    = resolveKey(s, [this.m.item_code, 'ITEM CODE', 'Item Code'], 'Item Code');
+        this.descKey    = resolveKey(s, [this.m.item_description, 'ITEM DESC.', 'ITEM DESC', 'Item Description'], 'Item Description');
+        this.hsnKey     = resolveKey(s, [this.m.hsn_code, 'HSN/SAC CODE', 'HSN/SAC'], 'HSN/SAC');
+        this.uomKey     = resolveKey(s, [this.m.uom, 'UOM'], 'UOM');
+        this.freightKey = resolveKey(s, [this.m.freight, 'FREIGHT', 'Freight'], 'Freight');
+        this.grossKey   = resolveKey(s, [this.m.gross_amount, 'GROSS', 'Gross'], 'Gross');
+        this.stateKey   = resolveKey(s, [this.m.state, 'STATE CODE /NAME', 'STATE CODE/NAME', 'State'], 'State');
+        this.deptKey    = resolveKey(s, [this.m.department, 'DEPARTMENT', 'Department'], 'Department');
+        this.mrnNoKey   = resolveKey(s, [this.m.mrn_number, 'MRN NO.', 'MRN NO'], 'MRN No');
+        this.billNoKey  = resolveKey(s, [this.m.bill_number, 'BILL NO.', 'BILL NO'], 'Bill No');
+        this.poNoKey    = resolveKey(s, [this.m.po_number, 'PO NO.', 'PO NO'], 'PO No');
 
-        // Resolve column keys once — avoids repeating fallback chains everywhere
-        this.amtKey   = this.m.amount         ?? this.m.invoice_amount ?? 'Amount';
-        this.supKey   = this.m.supplier        ?? this.m.vendor         ?? 'Supplier';
-        this.catL1Key = this.m.category_l1     ?? this.m.category       ?? 'Category';
-        this.catL2Key = this.m.category_l2     ?? this.catL1Key;
-        this.catL3Key = this.m.category_l3     ?? this.catL2Key;
-        this.dateKey  = this.m.date            ?? this.m.invoice_date   ?? this.m.po_date ?? 'Date';
-        this.curKey   = this.m.currency        ?? '';
-        this.qtyKey   = this.m.quantity        ?? '';
-        this.upKey    = this.m.unit_price      ?? '';
-        this.ptKey    = this.m.payment_terms   ?? '';
-        this.buKey    = this.m.business_unit   ?? '';
-        this.plantKey = this.m.plant           ?? this.m.location       ?? '';
-        this.deptKey  = this.m.department      ?? '';
-        this.ccKey    = this.m.cost_center     ?? '';
-        this.regionKey = this.m.region         ?? '';
-        this.coKey    = this.m.company_code    ?? '';
-        this.docKey   = this.m.document_number ?? this.m.invoice_number ?? '';
-        this.poKey    = this.m.po_number       ?? '';
-        // this.invKey = this.m.invoice_number  ?? '';  // reserved
-        this.ctrKey   = this.m.contract_ref    ?? '';
-        this.descKey  = this.m.item_description ?? '';
-
-        this.wb.creator          = 'Data Domino — Antigravity';
-        this.wb.lastModifiedBy   = 'Data Domino — Antigravity';
-        this.wb.created          = new Date();
-        this.wb.modified         = new Date();
+        this.wb.creator = 'Data Domino';
+        this.wb.lastModifiedBy = 'Data Domino';
+        this.wb.created = new Date();
+        this.wb.modified = new Date();
     }
 
     // -----------------------------------------------------------------------
@@ -246,859 +185,501 @@ export class ExcelGenerator {
     public async generate(): Promise<Blob> {
         const stats = this.buildStats();
 
-        this.createDocumentation(stats);
-        this.createFactSpend(stats);
-        this.createDimSupplier(stats);
-        this.createDimCategory(stats);
-        this.createDimOrg(stats);
-        this.createDimDate();
-        this.createKpiExport(stats);
-        this.createDataQuality();
+        this.createReadme(stats);
+        this.createExecutiveSummary(stats);
+        this.createSpendByCategory(stats);
+        this.createSpendByVendor(stats);
+        this.createMultiVendorBenchmark(stats);
+        this.createSavings(stats);
+        this.createCleanedData();   // last sheet, but report sheets above reference it by name
 
         const buf = await this.wb.xlsx.writeBuffer();
         return new Blob([buf], {
-            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         });
     }
 
     // -----------------------------------------------------------------------
-    // Pre-compute all aggregations once so every sheet can reuse them
+    // Aggregation (computed once, reused by every sheet)
     // -----------------------------------------------------------------------
     private buildStats() {
-        const totalSpend   = this.data.reduce((s, r) => s + parseAmount(r[this.amtKey]), 0);
-        const txCount      = this.data.length;
-        const avgTx        = txCount > 0 ? totalSpend / txCount : 0;
-        const abcMap       = buildAbcMap(this.data, this.amtKey, this.supKey);
+        const data = this.data;
+        let totalBasic = 0;
+        let totalGross = 0;
+        let totalFreight = 0;
+        const vendorSet = new Set<string>();
+        const itemSet = new Set<string>();
 
-        // --- Supplier aggregation ---
-        const supMap = new Map<string, { spend: number; count: number; l1Set: Set<string>; mavCount: number }>();
-        for (const row of this.data) {
-            const s  = str(row[this.supKey], 'Unknown');
-            const amt = parseAmount(row[this.amtKey]);
-            if (!supMap.has(s)) supMap.set(s, { spend: 0, count: 0, l1Set: new Set(), mavCount: 0 });
-            const e = supMap.get(s)!;
-            e.spend += amt;
-            e.count++;
-            if (this.catL1Key) e.l1Set.add(str(row[this.catL1Key], 'Uncategorized'));
-            if (isMaverick(row, this.ctrKey || undefined)) e.mavCount++;
-        }
-        const suppliers = [...supMap.entries()]
-            .map(([name, d]) => ({ name, ...d, abc: abcMap.get(name) ?? 'C', avgTx: d.count > 0 ? d.spend / d.count : 0 }))
-            .sort((a, b) => b.spend - a.spend);
+        // Category L1 aggregation
+        const catMap = new Map<string, { spend: number; lines: number }>();
+        // Vendor aggregation
+        const venMap = new Map<string, { spend: number; lines: number; items: Set<string> }>();
+        // Per-item aggregation (for benchmark): item -> vendor -> {qty, spend}; plus uom set, desc, cat
+        const itemMap = new Map<string, {
+            desc: string; cat: string; uoms: Set<string>;
+            qty: number; spend: number;
+            vendors: Map<string, { qty: number; spend: number }>;
+        }>();
 
-        // --- Category L1/L2 aggregation ---
-        const catMap = new Map<string, { spend: number; count: number; l2Map: Map<string, { spend: number; count: number }> }>();
-        for (const row of this.data) {
-            const l1  = str(row[this.catL1Key], 'Uncategorized');
-            const l2  = str(row[this.catL2Key], l1);
-            const amt = parseAmount(row[this.amtKey]);
-            if (!catMap.has(l1)) catMap.set(l1, { spend: 0, count: 0, l2Map: new Map() });
-            const ce = catMap.get(l1)!;
-            ce.spend += amt; ce.count++;
-            if (!ce.l2Map.has(l2)) ce.l2Map.set(l2, { spend: 0, count: 0 });
-            const l2e = ce.l2Map.get(l2)!;
-            l2e.spend += amt; l2e.count++;
+        for (const row of data) {
+            const basic = parseAmount(row[this.amtKey]);
+            const ven = str(row[this.supKey], 'Unknown');
+            const item = str(row[this.itemKey], 'Unknown');
+            const cat = str(row[this.catKey], 'Other / Uncategorized');
+            const qty = parseAmount(row[this.qtyKey]);
+            const uom = str(row[this.uomKey], '');
+
+            totalBasic += basic;
+            totalGross += parseAmount(row[this.grossKey]);
+            totalFreight += parseAmount(row[this.freightKey]);
+            if (ven && ven !== 'Unknown') vendorSet.add(ven);
+            if (item && item !== 'Unknown') itemSet.add(item);
+
+            const ce = catMap.get(cat) ?? { spend: 0, lines: 0 };
+            ce.spend += basic; ce.lines += 1; catMap.set(cat, ce);
+
+            const ve = venMap.get(ven) ?? { spend: 0, lines: 0, items: new Set<string>() };
+            ve.spend += basic; ve.lines += 1; ve.items.add(item); venMap.set(ven, ve);
+
+            const ie = itemMap.get(item) ?? {
+                desc: str(row[this.descKey]), cat, uoms: new Set<string>(),
+                qty: 0, spend: 0, vendors: new Map<string, { qty: number; spend: number }>(),
+            };
+            ie.qty += qty; ie.spend += basic;
+            if (uom) ie.uoms.add(uom);
+            const vv = ie.vendors.get(ven) ?? { qty: 0, spend: 0 };
+            vv.qty += qty; vv.spend += basic; ie.vendors.set(ven, vv);
+            itemMap.set(item, ie);
         }
+
         const categories = [...catMap.entries()]
-            .map(([l1, d]) => ({ l1, ...d, l2List: [...d.l2Map.entries()].map(([l2, dd]) => ({ l2, ...dd })).sort((a, b) => b.spend - a.spend) }))
+            .map(([name, d]) => ({ name, spend: d.spend, lines: d.lines }))
             .sort((a, b) => b.spend - a.spend);
 
-        // --- Org (BU) aggregation ---
-        const buMap = new Map<string, number>();
-        if (this.buKey) {
-            for (const row of this.data) {
-                const bu = str(row[this.buKey], 'Unknown');
-                buMap.set(bu, (buMap.get(bu) ?? 0) + parseAmount(row[this.amtKey]));
-            }
-        }
+        const vendors = [...venMap.entries()]
+            .map(([name, d]) => ({ name, spend: d.spend, lines: d.lines, itemCount: d.items.size }))
+            .sort((a, b) => b.spend - a.spend);
 
-        // --- Monthly aggregation ---
-        const monthMap = new Map<string, { spend: number; count: number; mav: number }>();
-        for (const row of this.data) {
-            const d = parseDate(row[this.dateKey]);
-            if (!d) continue;
-            const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-            if (!monthMap.has(key)) monthMap.set(key, { spend: 0, count: 0, mav: 0 });
-            const me = monthMap.get(key)!;
-            me.spend += parseAmount(row[this.amtKey]);
-            me.count++;
-            if (isMaverick(row, this.ctrKey || undefined)) me.mav++;
-        }
-        const months = [...monthMap.entries()].sort(([a], [b]) => a.localeCompare(b))
-            .map(([ym, d]) => ({ ym, ...d }));
+        // --- Multi-vendor benchmark ---
+        // Comparable = item bought from >=2 distinct vendors AND a single clean UOM.
+        const benchmark = [...itemMap.entries()]
+            .filter(([, d]) => d.vendors.size >= 2 && d.uoms.size === 1 && d.qty > 0)
+            .map(([code, d]) => {
+                const paidWavg = d.spend / d.qty;
+                let bestRate = Infinity, worstRate = 0, bestVendor = '';
+                for (const [vn, vd] of d.vendors) {
+                    if (vd.qty <= 0) continue;
+                    const r = vd.spend / vd.qty;
+                    if (r < bestRate) { bestRate = r; bestVendor = vn; }
+                    if (r > worstRate) worstRate = r;
+                }
+                const saving = Math.max(0, paidWavg - bestRate) * d.qty; // capped at spend by construction
+                return {
+                    code, desc: d.desc, cat: d.cat, uom: [...d.uoms][0],
+                    nVendors: d.vendors.size, qty: d.qty, spend: d.spend,
+                    paidWavg, bestRate, bestVendor,
+                    spread: bestRate > 0 ? worstRate / bestRate : 0,
+                    saving, savingPct: d.spend > 0 ? saving / d.spend : 0,
+                };
+            })
+            .sort((a, b) => b.saving - a.saving);
 
-        // Tail-spend detection: suppliers whose total spend < 5% of avg tx * total rows
-        const tailThreshold = avgTx;   // 1× avg transaction as tail boundary
-        const tailCount = suppliers.filter(s => isTailSpend(s.spend, tailThreshold)).length;
-        const tailSpend = suppliers.filter(s => isTailSpend(s.spend, tailThreshold))
-            .reduce((s, v) => s + v.spend, 0);
-        const top3Conc  = totalSpend > 0
-            ? suppliers.slice(0, 3).reduce((s, v) => s + v.spend, 0) / totalSpend
-            : 0;
+        const multiVendorSpend = [...itemMap.values()]
+            .filter(d => d.vendors.size >= 2)
+            .reduce((acc, d) => acc + d.spend, 0);
+
+        // Fuel / biomass spend (rice husk + petroleum/LPG buckets, matched by category name)
+        const fuelSpend = categories
+            .filter(c => /fuel|biomass|husk|petroleum|lpg|agri/i.test(c.name))
+            .reduce((acc, c) => acc + c.spend, 0);
+
+        // Saving excluding biomass/fuel items (defensible recurring rate harmonisation)
+        const rateHarmonisationSaving = benchmark
+            .filter(b => !/fuel|biomass|husk|petroleum|lpg|agri/i.test(b.cat))
+            .reduce((acc, b) => acc + b.saving, 0);
+        const rateHarmonisationSpend = benchmark
+            .filter(b => !/fuel|biomass|husk|petroleum|lpg|agri/i.test(b.cat))
+            .reduce((acc, b) => acc + b.spend, 0);
+
+        const top3Conc = totalBasic > 0
+            ? vendors.slice(0, 3).reduce((acc, v) => acc + v.spend, 0) / totalBasic : 0;
+        const tailVendors = vendors.filter(v => v.spend < 200000); // < Rs 2L/yr
 
         return {
-            totalSpend, txCount, avgTx,
-            suppliers, categories, months,
-            buMap, abcMap,
-            tailCount, tailSpend, top3Conc,
-            uniqueSuppliers: suppliers.length,
-            uniqueCategories: categories.length,
+            totalBasic, totalGross, totalFreight,
+            uniqueVendors: vendorSet.size, uniqueItems: itemSet.size, lineItems: data.length,
+            categories, vendors, benchmark,
+            multiVendorSpend, fuelSpend,
+            rateHarmonisationSaving, rateHarmonisationSpend,
+            top3Conc, tailVendors,
         };
     }
 
     // -----------------------------------------------------------------------
     // Styling helpers
     // -----------------------------------------------------------------------
+    private fmtCr(rs: number) { return `${(rs / 1e7).toFixed(2)} Rs Cr`; }
 
-    /** Bold white text on BRAND_BLUE — used for column headers */
-    private styleHeader(cell: ExcelJS.Cell, small = false) {
-        cell.fill   = { type: 'pattern', pattern: 'solid', fgColor: { argb: BRAND_BLUE } };
-        cell.font   = { bold: true, color: { argb: HEADER_WHITE }, name: 'Calibri', size: small ? 10 : 11 };
-        cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
-        cell.border = {
-            top:    { style: 'thin', color: { argb: '2C4A7C' } },
-            left:   { style: 'thin', color: { argb: '2C4A7C' } },
-            bottom: { style: 'medium', color: { argb: '2C4A7C' } },
-            right:  { style: 'thin', color: { argb: '2C4A7C' } },
-        };
-    }
-
-    /** Section title inside a sheet */
-    private styleSection(cell: ExcelJS.Cell, text: string) {
+    private styleTitle(cell: ExcelJS.Cell, text: string, size = 16) {
         cell.value = text;
-        cell.font  = { bold: true, size: 14, color: { argb: ACCENT_BLUE }, name: 'Calibri' };
+        cell.font = { bold: true, size, color: { argb: TITLE_TEXT }, name: 'Calibri' };
     }
 
-    /** Subtle alternating row fill for fact rows */
-    private shadeRow(row: ExcelJS.Row, idx: number) {
-        if (idx % 2 === 0) {
-            row.eachCell({ includeEmpty: true }, cell => {
-                cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: LIGHT_BLUE } };
-            });
+    private styleHeaderRow(row: ExcelJS.Row) {
+        row.eachCell({ includeEmpty: true }, cell => {
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: HEADER_FILL } };
+            cell.font = { bold: true, color: { argb: HEADER_TEXT }, name: 'Calibri', size: 11 };
+            cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+        });
+        row.height = 26;
+    }
+
+    private tile(ws: ExcelJS.Worksheet, labelCell: string, valueCell: string, label: string, value: string) {
+        const l = ws.getCell(labelCell);
+        l.value = label;
+        l.font = { size: 9, color: { argb: SUBTLE_TEXT }, name: 'Calibri' };
+        l.alignment = { wrapText: true, vertical: 'top' };
+        const v = ws.getCell(valueCell);
+        v.value = value;
+        v.font = { bold: true, size: 14, color: { argb: TITLE_TEXT }, name: 'Calibri' };
+        v.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: TILE_FILL } };
+    }
+
+    // -----------------------------------------------------------------------
+    // SHEET 00 — README
+    // -----------------------------------------------------------------------
+    private createReadme(_stats: ReturnType<ExcelGenerator['buildStats']>) {
+        const ws = this.wb.addWorksheet('00_README', { views: [{ showGridLines: false }] });
+        ws.getColumn(1).width = 2;
+        ws.getColumn(2).width = 110;
+        const lines: Array<[string, 'title' | 'h' | 'p']> = [
+            ['Procurement Spend Analysis', 'title'],
+            ['Generated by Data Domino', 'p'],
+            ['', 'p'],
+            ['WHAT THIS WORKBOOK CONTAINS', 'h'],
+            ['01_Executive_Summary  – headline spend, vendor and savings KPIs.', 'p'],
+            ['02_Spend_by_Category  – pre-tax spend grouped by category (live formulas off 06_Cleaned_Data).', 'p'],
+            ['03_Spend_by_Vendor  – vendors ranked by spend with Pareto cumulative %.', 'p'],
+            ['04_MultiVendor_Benchmark  – items bought from 2+ vendors, rate gap and potential saving.', 'p'],
+            ['05_Savings_Opportunities  – quantified and structural cost levers.', 'p'],
+            ['06_Cleaned_Data  – the normalised transaction grid all sheets are built from.', 'p'],
+            ['', 'p'],
+            ['HOW SPEND IS MEASURED', 'h'],
+            ['"Spend" = BASIC AMOUNT (pre-tax). Tax-inclusive totals are shown separately on the summary.', 'p'],
+            ['Pre-tax is used because GST is recoverable and not a true cost lever.', 'p'],
+            ['', 'p'],
+            ['READ THE SAVINGS NUMBERS AS AN UPPER BOUND', 'h'],
+            ['Potential saving on a multi-vendor item = (weighted-avg rate paid − best in-year vendor rate) × annual qty.', 'p'],
+            ['This is an UPPER BOUND. It does not adjust for grade/spec differences, intra-year price movement,', 'p'],
+            ['freight terms or lot sizes. Treat each line as a question to validate, not a booked saving.', 'p'],
+            ['Confidence ratings on 05_Savings_Opportunities flag where the benchmark is soft (e.g. seasonal fuel).', 'p'],
+        ];
+        let r = 2;
+        for (const [text, kind] of lines) {
+            const c = ws.getCell(`B${r}`);
+            c.value = text;
+            if (kind === 'title') c.font = { bold: true, size: 18, color: { argb: TITLE_TEXT } };
+            else if (kind === 'h') c.font = { bold: true, size: 12, color: { argb: HEADER_FILL } };
+            else c.font = { size: 10, color: { argb: '333333' } };
+            r++;
         }
     }
 
-    /** Apply header styling to an entire row */
-    private styleHeaderRow(row: ExcelJS.Row, small = false) {
-        row.eachCell({ includeEmpty: true }, cell => this.styleHeader(cell, small));
-        row.height = small ? 22 : 28;
+    // -----------------------------------------------------------------------
+    // SHEET 01 — Executive Summary (KPI tiles)
+    // -----------------------------------------------------------------------
+    private createExecutiveSummary(stats: ReturnType<ExcelGenerator['buildStats']>) {
+        const ws = this.wb.addWorksheet('01_Executive_Summary', { views: [{ showGridLines: false }] });
+        ws.getColumn(1).width = 2;
+        ws.getColumn(2).width = 26; ws.getColumn(3).width = 18;
+        ws.getColumn(4).width = 3;
+        ws.getColumn(5).width = 26; ws.getColumn(6).width = 18;
+
+        this.styleTitle(ws.getCell('B2'), 'Executive Summary');
+        const sub = ws.getCell('B3');
+        sub.value = 'Procurement spend analysis';
+        sub.font = { italic: true, color: { argb: SUBTLE_TEXT } };
+
+        const topCat = stats.categories[0];
+        this.tile(ws, 'B5', 'B6', 'Total pre-tax spend', this.fmtCr(stats.totalBasic));
+        this.tile(ws, 'E5', 'E6', 'Total incl. tax', this.fmtCr(stats.totalGross));
+        this.tile(ws, 'B8', 'B9', 'Vendors', stats.uniqueVendors.toLocaleString('en-IN'));
+        this.tile(ws, 'E8', 'E9', 'Distinct items', stats.uniqueItems.toLocaleString('en-IN'));
+        this.tile(ws, 'B11', 'B12', 'Line items', stats.lineItems.toLocaleString('en-IN'));
+        this.tile(ws, 'E11', 'E12', 'Multi-vendor spend', this.fmtCr(stats.multiVendorSpend));
+        this.tile(ws, 'B14', 'B15', topCat ? `Top category (${topCat.name})` : 'Top category', topCat ? this.fmtCr(topCat.spend) : '-');
+        this.tile(ws, 'E14', 'E15', 'Fuel spend (rice husk + petroleum)', this.fmtCr(stats.fuelSpend));
+
+        const h = ws.getCell('B17');
+        h.value = 'SAVINGS HEADLINE';
+        h.font = { bold: true, size: 12, color: { argb: HEADER_FILL } };
+
+        const bullets = [
+            `Firmer recurring lever — rate harmonisation across multi-vendor items: ~${this.fmtCr(stats.rateHarmonisationSaving)} (ex-fuel).`,
+            `Timing lever — fuel/biomass at ${this.fmtCr(stats.fuelSpend)}; savings are seasonal, not vendor-driven (low confidence).`,
+            `Structural — qualify a second source on high-spend single-vendor items.`,
+            `Enabler — clean up generic/catch-all item codes so spend is attributable.`,
+            `See 05_Savings_Opportunities for the lever-by-lever breakdown.`,
+        ];
+        let r = 18;
+        for (const b of bullets) {
+            const c = ws.getCell(`B${r}`);
+            c.value = `•  ${b}`;
+            c.font = { size: 10, color: { argb: '333333' } };
+            ws.mergeCells(`B${r}:F${r}`);
+            c.alignment = { wrapText: true };
+            ws.getRow(r).height = 28;
+            r++;
+        }
     }
 
-    /** Currency format string */
-    private get curFmt() { return `"${this.sym}"#,##0.00`; }
-    // private get curFmt0() { return `"${this.sym}"#,##0`; }  // zero-decimal currency — reserved
-    private get pctFmt() { return '0.0%'; }
-
     // -----------------------------------------------------------------------
-    // TAB 0: 0_Documentation
+    // SHEET 02 — Spend by Category (live SUMIF off 06_Cleaned_Data)
     // -----------------------------------------------------------------------
-    private createDocumentation(stats: ReturnType<ExcelGenerator['buildStats']>) {
-        const ws = this.wb.addWorksheet('0_Documentation', { views: [{ showGridLines: false }] });
+    private createSpendByCategory(stats: ReturnType<ExcelGenerator['buildStats']>) {
+        const ws = this.wb.addWorksheet('02_Spend_by_Category');
+        ws.getColumn(1).width = 34; ws.getColumn(2).width = 20;
+        ws.getColumn(3).width = 10; ws.getColumn(4).width = 11; ws.getColumn(5).width = 12;
 
-        ws.getColumn(1).width = 28;
-        ws.getColumn(2).width = 70;
+        this.styleTitle(ws.getCell('A1'), 'Spend by Category');
 
-        // ── Title block ───────────────────────────────────────────────────
-        ws.mergeCells('A1:B1');
-        const title = ws.getCell('A1');
-        title.value     = 'Data Domino — Procurement Spend Analysis Export';
-        title.font      = { bold: true, size: 18, color: { argb: BRAND_BLUE }, name: 'Calibri' };
-        title.alignment = { vertical: 'middle', horizontal: 'left' };
-        title.fill      = { type: 'pattern', pattern: 'solid', fgColor: { argb: LIGHT_GRAY } };
-        ws.getRow(1).height = 40;
+        const hdr = ws.getRow(3);
+        hdr.values = ['Category', 'Annual Spend (Rs)', 'Rs Cr', '% of Total', 'Line Items'];
+        this.styleHeaderRow(hdr);
 
-        ws.mergeCells('A2:B2');
-        ws.getCell('A2').value = `Generated: ${new Date().toLocaleString('en-GB')}   |   Rows analysed: ${stats.txCount.toLocaleString()}   |   Currency: ${this.cur}`;
-        ws.getCell('A2').font  = { italic: true, size: 10, color: { argb: MID_GRAY } };
-
-        // ── Workbook purpose ─────────────────────────────────────────────
+        const n = this.data.length;        // data rows in 06 start at row 2
+        const lastRow = n + 1;             // 06 has header on row 1
+        const totalRowNum = 4 + stats.categories.length;
         let r = 4;
-        this.styleSection(ws.getCell(`A${r}`), 'PURPOSE');
-        r++;
-        const purpose = [
-            'This workbook is a star-schema ETL export from Data Domino.',
-            'The central fact table (1_Fact_Spend) contains one row per transaction.',
-            'Dimension tabs (Supplier, Category, Org, Date) can be joined on their key columns.',
-            '6_KPI_Export provides pre-aggregated KPIs ready for charting or BI ingestion.',
-            '7_Data_Quality audits field completeness so you know where data gaps exist.',
-        ];
-        for (const line of purpose) {
-            ws.getCell(`B${r}`).value = line;
-            ws.getCell(`B${r}`).font  = { size: 10, name: 'Calibri' };
-            r++;
-        }
-
-        // ── Tab directory ─────────────────────────────────────────────────
-        r += 2;
-        this.styleSection(ws.getCell(`A${r}`), 'WORKBOOK STRUCTURE');
-        r++;
-        const tabs: [string, string][] = [
-            ['0_Documentation', 'This tab — data dictionary, assumptions, refresh info'],
-            ['1_Fact_Spend',    'Master transaction fact table — one row per invoice/PO line'],
-            ['2_Dim_Supplier',  'Supplier master — one row per unique supplier'],
-            ['3_Dim_Category',  'Category hierarchy — L1 / L2 / L3 + strategic tags'],
-            ['4_Dim_Org',       'Organisational hierarchy — BU / plant / region / cost centre'],
-            ['5_Dim_Date',      'Date dimension — calendar, quarter, fiscal period'],
-            ['6_KPI_Export',    'Pre-aggregated KPI table — period × category × BU'],
-            ['7_Data_Quality',  'Field-level completeness audit across all columns'],
-        ];
-        for (const [tab, desc] of tabs) {
-            ws.getCell(`A${r}`).value = tab;
-            ws.getCell(`A${r}`).font  = { bold: true, size: 10, color: { argb: ACCENT_BLUE } };
-            ws.getCell(`B${r}`).value = desc;
-            ws.getCell(`B${r}`).font  = { size: 10 };
-            r++;
-        }
-
-        // ── Column dictionary for 1_Fact_Spend ───────────────────────────
-        r += 2;
-        this.styleSection(ws.getCell(`A${r}`), 'COLUMN DICTIONARY — 1_Fact_Spend');
-        r++;
-        ws.getCell(`A${r}`).value = 'Column';
-        ws.getCell(`B${r}`).value = 'Description';
-        this.styleHeader(ws.getCell(`A${r}`));
-        this.styleHeader(ws.getCell(`B${r}`));
-        r++;
-
-        const dict: [string, string][] = [
-            ['Transaction_Date',        'Invoice / PO date parsed from source data'],
-            ['Fiscal_Year',             'Fiscal year derived from transaction date (April start)'],
-            ['Fiscal_Period',           'Fiscal period P01–P12 (P01 = April)'],
-            ['Year_Month',              'Calendar YYYY-MM for time-series analysis'],
-            ['Quarter',                 'Q1–Q4 calendar quarter'],
-            ['Document_Number',         'Invoice / document reference from source'],
-            ['PO_Number',               'Purchase order number from source'],
-            ['Supplier_ID',             'Normalised supplier key (uppercase, trimmed)'],
-            ['Supplier_Name',           'Original supplier name from source'],
-            ['Category_L1',             'Top-level spend category (e.g. Direct / Indirect)'],
-            ['Category_L2',             'Mid-level category (e.g. MRO, IT, Marketing)'],
-            ['Category_L3',             'Granular category from source data'],
-            ['Business_Unit',           'Business unit or cost centre from source'],
-            ['Plant_Location',          'Plant or physical location from source'],
-            ['Region',                  'Geographic region from source'],
-            ['Currency',                'Transaction currency from source (or assumed if blank)'],
-            ['Amount_Doc_Currency',     'Raw transaction amount in document currency'],
-            [`Amount_${this.cur}`,      `Amount converted to reporting currency (${this.cur})`],
-            ['Quantity',                'Transaction quantity (if mapped)'],
-            ['Unit_Price',              'Unit price (if mapped)'],
-            ['Payment_Terms',           'Payment terms (if mapped)'],
-            ['Contract_ID',             'Contract reference (blank = off-contract / maverick)'],
-            ['Item_Description',        'Cleaned item or service description (if mapped)'],
-            ['ABC_Class',               'Supplier ABC classification — A (top 70%), B (80-90%), C (tail)'],
-            ['Maverick_Spend_Flag',     'Y = transaction has no contract reference; N = on-contract'],
-            ['Tail_Spend_Flag',         'Y = supplier total spend < 5% of avg transaction value'],
-            ['Spend_Under_Management',  'Y = transaction is on-contract; N = off-contract'],
-        ];
-
-        for (const [col, desc] of dict) {
-            ws.getCell(`A${r}`).value = col;
-            ws.getCell(`A${r}`).font  = { size: 10, bold: true };
-            ws.getCell(`B${r}`).value = desc;
-            ws.getCell(`B${r}`).font  = { size: 10 };
-            r++;
-        }
-
-        // ── Key assumptions ────────────────────────────────────────────────
-        r += 2;
-        this.styleSection(ws.getCell(`A${r}`), 'KEY ASSUMPTIONS');
-        r++;
-        const assumptions: [string, string][] = [
-            ['Fiscal year start',   'April (P01 = April, P12 = March). Adjust in source code if different.'],
-            ['Currency conversion', `All amounts are in source currency. If multiple currencies exist, conversion to ${this.cur} used ETL-time exchange rates.`],
-            ['Maverick spend',      'Flagged where Contract_ID is blank, "None", or "N/A" in source data.'],
-            ['Tail spend',          'Flagged where supplier total spend < 5% of the average transaction value across the dataset.'],
-            ['ABC classification',  'A = suppliers making up cumulative 70% of spend; B = next 20%; C = remaining 10%.'],
-            ['Data completeness',   'See 7_Data_Quality for field-level fill rates. Blank = unmapped or absent in source.'],
-        ];
-        for (const [key, val] of assumptions) {
-            ws.getCell(`A${r}`).value = key;
-            ws.getCell(`A${r}`).font  = { bold: true, size: 10 };
-            ws.getCell(`B${r}`).value = val;
-            ws.getCell(`B${r}`).font  = { size: 10, italic: true, color: { argb: MID_GRAY } };
-            ws.getCell(`B${r}`).alignment = { wrapText: true };
-            ws.getRow(r).height = 30;
-            r++;
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // TAB 1: 1_Fact_Spend
-    // -----------------------------------------------------------------------
-    private createFactSpend(stats: ReturnType<ExcelGenerator['buildStats']>) {
-        const ws = this.wb.addWorksheet('1_Fact_Spend');
-
-        const columns: { header: string; key: string; width: number; numFmt?: string }[] = [
-            // Date
-            { header: 'Transaction_Date',       key: 'tx_date',     width: 16, numFmt: 'dd/mm/yyyy' },
-            { header: 'Fiscal_Year',             key: 'fy',          width: 10 },
-            { header: 'Fiscal_Period',           key: 'fp',          width: 12 },
-            { header: 'Year_Month',              key: 'ym',          width: 12 },
-            { header: 'Quarter',                 key: 'qtr',         width: 9 },
-            // Document
-            { header: 'Document_Number',         key: 'doc_no',      width: 20 },
-            { header: 'PO_Number',               key: 'po_no',       width: 18 },
-            { header: 'Contract_ID',             key: 'ctr_id',      width: 18 },
-            // Supplier
-            { header: 'Supplier_ID',             key: 'sup_id',      width: 22 },
-            { header: 'Supplier_Name',           key: 'sup_name',    width: 32 },
-            // Category
-            { header: 'Category_L1',             key: 'cat_l1',      width: 20 },
-            { header: 'Category_L2',             key: 'cat_l2',      width: 22 },
-            { header: 'Category_L3',             key: 'cat_l3',      width: 22 },
-            // Org
-            { header: 'Company_Code',            key: 'co_code',     width: 14 },
-            { header: 'Business_Unit',           key: 'bu',          width: 20 },
-            { header: 'Plant_Location',          key: 'plant',       width: 18 },
-            { header: 'Department',              key: 'dept',        width: 18 },
-            { header: 'Cost_Center',             key: 'cc',          width: 16 },
-            { header: 'Region',                  key: 'region',      width: 14 },
-            // Finance
-            { header: 'Currency',               key: 'cur',          width: 10 },
-            { header: 'Amount_Doc_Currency',    key: 'amt_doc',      width: 22, numFmt: '#,##0.00' },
-            { header: `Amount_${this.cur}`,     key: 'amt_rpt',      width: 22, numFmt: this.curFmt },
-            { header: 'Quantity',               key: 'qty',          width: 12, numFmt: '#,##0.00' },
-            { header: 'Unit_Price',             key: 'up',           width: 14, numFmt: '#,##0.00' },
-            { header: 'Payment_Terms',          key: 'pt',           width: 16 },
-            { header: 'Item_Description',       key: 'item_desc',    width: 34 },
-            // Analytics flags
-            { header: 'ABC_Class',              key: 'abc',          width: 11 },
-            { header: 'Maverick_Spend_Flag',    key: 'mav',          width: 20 },
-            { header: 'Tail_Spend_Flag',        key: 'tail',         width: 16 },
-            { header: 'Spend_Under_Management', key: 'sum',          width: 24 },
-        ];
-
-        ws.columns = columns.map(c => ({ header: c.header, key: c.key, width: c.width }));
-        this.styleHeaderRow(ws.getRow(1));
-        ws.getRow(1).height = 32;
-
-        // Apply number formats per column
-        columns.forEach((c, i) => {
-            if (c.numFmt) ws.getColumn(i + 1).numFmt = c.numFmt;
-        });
-
-        // Supplier total-spend lookup (for tail detection)
-        const supTotalMap = new Map<string, number>(
-            stats.suppliers.map(s => [s.name, s.spend])
-        );
-        const avgTx = stats.avgTx;
-
-        let rowIdx = 0;
-        for (const row of this.data) {
-            const supName  = str(row[this.supKey], 'Unknown');
-            const supTotal = supTotalMap.get(supName) ?? 0;
-            const amt      = parseAmount(row[this.amtKey]);
-            const d        = parseDate(row[this.dateKey]);
-            const fp       = d ? fiscalPeriod(d) : { fiscalYear: '', fiscalPeriod: '' };
-            const ym       = d ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}` : '';
-            const qtr      = d ? `Q${Math.ceil((d.getMonth() + 1) / 3)}` : '';
-            const mav      = isMaverick(row, this.ctrKey || undefined) ? 'Y' : 'N';
-            const tail     = isTailSpend(supTotal, avgTx) ? 'Y' : 'N';
-            const abc      = stats.abcMap.get(supName) ?? 'C';
-
-            const dataRow = ws.addRow({
-                tx_date:  d ?? undefined,
-                fy:       fp.fiscalYear,
-                fp:       fp.fiscalPeriod,
-                ym,
-                qtr,
-                doc_no:   str(row[this.docKey]),
-                po_no:    str(row[this.poKey]),
-                ctr_id:   str(row[this.ctrKey]),
-                sup_id:   supName.toUpperCase().replace(/\s+/g, '_'),
-                sup_name: supName,
-                cat_l1:   str(row[this.catL1Key], 'Uncategorized'),
-                cat_l2:   str(row[this.catL2Key], str(row[this.catL1Key], 'Uncategorized')),
-                cat_l3:   str(row[this.catL3Key], str(row[this.catL2Key], str(row[this.catL1Key], 'Uncategorized'))),
-                co_code:  str(row[this.coKey]),
-                bu:       str(row[this.buKey]),
-                plant:    str(row[this.plantKey]),
-                dept:     str(row[this.deptKey]),
-                cc:       str(row[this.ccKey]),
-                region:   str(row[this.regionKey]),
-                cur:      str(row[this.curKey], this.cur),
-                amt_doc:  amt,
-                amt_rpt:  amt,  // already in reporting currency after ETL FX normalisation
-                qty:      this.qtyKey ? parseAmount(row[this.qtyKey]) : undefined,
-                up:       this.upKey  ? parseAmount(row[this.upKey])  : undefined,
-                pt:       str(row[this.ptKey]),
-                item_desc:str(row[this.descKey]),
-                abc,
-                mav,
-                tail,
-                sum:      mav === 'N' ? 'Y' : 'N',
-            });
-
-            this.shadeRow(dataRow, rowIdx);
-
-            // Colour the ABC class cell
-            const abcCell = dataRow.getCell('abc');
-            abcCell.font  = { bold: true, color: { argb: abc === 'A' ? GREEN_OK : abc === 'B' ? AMBER_WARN : MID_GRAY } };
-
-            // Red maverick flag
-            if (mav === 'Y') {
-                dataRow.getCell('mav').font = { color: { argb: RED_CRIT } };
-            }
-
-            rowIdx++;
-        }
-
-        ws.autoFilter = {
-            from: { row: 1, column: 1 },
-            to:   { row: 1, column: columns.length }
-        };
-        ws.views = [{ state: 'frozen', xSplit: 0, ySplit: 1 }];
-    }
-
-    // -----------------------------------------------------------------------
-    // TAB 2: 2_Dim_Supplier
-    // -----------------------------------------------------------------------
-    private createDimSupplier(stats: ReturnType<ExcelGenerator['buildStats']>) {
-        const ws = this.wb.addWorksheet('2_Dim_Supplier');
-
-        ws.columns = [
-            { header: 'Supplier_ID',           key: 'id',        width: 26 },
-            { header: 'Supplier_Name',          key: 'name',      width: 34 },
-            { header: 'Segment',                key: 'seg',       width: 14 },
-            { header: 'ABC_Class',              key: 'abc',       width: 11 },
-            { header: 'Total_Spend',            key: 'spend',     width: 20 },
-            { header: 'Spend_Share_%',          key: 'share',     width: 16 },
-            { header: 'Transaction_Count',      key: 'count',     width: 20 },
-            { header: 'Avg_Transaction',        key: 'avg',       width: 20 },
-            { header: 'Category_L1_Primary',    key: 'cat',       width: 22 },
-            { header: 'Maverick_Tx_Count',      key: 'mav',       width: 20 },
-            { header: 'Maverick_Rate_%',        key: 'mavpct',    width: 18 },
-            { header: 'Risk_Tier',              key: 'risk',      width: 14 },
-            { header: 'Tail_Spend_Flag',        key: 'tail',      width: 16 },
-            { header: 'Contracted_Flag',        key: 'contracted',width: 16 },
-        ];
-        this.styleHeaderRow(ws.getRow(1));
-
-        ws.getColumn('spend').numFmt   = this.curFmt;
-        ws.getColumn('avg').numFmt     = this.curFmt;
-        ws.getColumn('share').numFmt   = this.pctFmt;
-        ws.getColumn('mavpct').numFmt  = this.pctFmt;
-
-        const total = stats.totalSpend;
-        const avgTx = stats.avgTx;
-
-        stats.suppliers.forEach((s, idx) => {
-            const tail  = isTailSpend(s.spend, avgTx);
-            const mav   = s.mavCount;
-            const mavPct = s.count > 0 ? mav / s.count : 0;
-
-            const seg = s.abc === 'A' ? 'Strategic'
-                      : s.abc === 'B' ? 'Preferred'
-                      : tail          ? 'Tail'
-                      : 'Tactical';
-
-            const risk = s.abc === 'A' && (s.spend / total) > 0.15 ? 'High'
-                       : s.abc === 'A'                               ? 'Medium'
-                       : 'Low';
-
-            const row = ws.addRow({
-                id:          s.name.toUpperCase().replace(/\s+/g, '_'),
-                name:        s.name,
-                seg,
-                abc:         s.abc,
-                spend:       s.spend,
-                share:       total > 0 ? s.spend / total : 0,
-                count:       s.count,
-                avg:         s.avgTx,
-                cat:         [...s.l1Set][0] ?? '',
-                mav,
-                mavpct:      mavPct,
-                risk,
-                tail:        tail ? 'Y' : 'N',
-                contracted:  mav === 0 ? 'Y' : 'N',
-            });
-
-            this.shadeRow(row, idx);
-
-            // High concentration highlight (> 10% share)
-            if (s.spend / total > 0.10) {
-                row.eachCell({ includeEmpty: true }, cell => {
-                    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: GOLD_HIGH } };
-                });
-            } else if (idx < 10) {
-                row.eachCell({ includeEmpty: true }, cell => {
-                    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: GREEN_TOP } };
-                });
-            }
-
-            // ABC font colour
-            row.getCell('abc').font = { bold: true, color: { argb: s.abc === 'A' ? GREEN_OK : s.abc === 'B' ? AMBER_WARN : MID_GRAY } };
-        });
-
-        ws.autoFilter = { from: 'A1', to: `N1` };
-        ws.views = [{ state: 'frozen', xSplit: 0, ySplit: 1 }];
-    }
-
-    // -----------------------------------------------------------------------
-    // TAB 3: 3_Dim_Category
-    // -----------------------------------------------------------------------
-    private createDimCategory(stats: ReturnType<ExcelGenerator['buildStats']>) {
-        const ws = this.wb.addWorksheet('3_Dim_Category');
-
-        ws.columns = [
-            { header: 'Category_L1',            key: 'l1',       width: 22 },
-            { header: 'Category_L2',            key: 'l2',       width: 24 },
-            { header: 'L1_Total_Spend',         key: 'l1spend',  width: 20 },
-            { header: 'L1_Spend_Share_%',       key: 'l1share',  width: 18 },
-            { header: 'L2_Total_Spend',         key: 'l2spend',  width: 20 },
-            { header: 'L2_Spend_Share_%',       key: 'l2share',  width: 18 },
-            { header: 'L2_Tx_Count',            key: 'l2count',  width: 14 },
-            { header: 'Strategy_Tag',           key: 'strat',    width: 18 },
-            { header: 'Pareto_Rank',            key: 'rank',     width: 14 },
-        ];
-        this.styleHeaderRow(ws.getRow(1));
-        ws.getColumn('l1spend').numFmt  = this.curFmt;
-        ws.getColumn('l2spend').numFmt  = this.curFmt;
-        ws.getColumn('l1share').numFmt  = this.pctFmt;
-        ws.getColumn('l2share').numFmt  = this.pctFmt;
-
-        const total = stats.totalSpend;
-        let rank    = 0;
-
         for (const cat of stats.categories) {
-            const l1Share = total > 0 ? cat.spend / total : 0;
-
-            // Strategy tag heuristic
-            const strat = l1Share > 0.3 ? 'Leverage'
-                        : l1Share > 0.1 ? 'Strategic'
-                        : l1Share > 0.03 ? 'Bottleneck'
-                        : 'Routine';
-
-            for (const l2 of cat.l2List) {
-                rank++;
-                const row = ws.addRow({
-                    l1:      cat.l1,
-                    l2:      l2.l2,
-                    l1spend: cat.spend,
-                    l1share: l1Share,
-                    l2spend: l2.spend,
-                    l2share: total > 0 ? l2.spend / total : 0,
-                    l2count: l2.count,
-                    strat,
-                    rank,
-                });
-                this.shadeRow(row, rank);
-
-                // Colour by strategy
-                const stratCell = row.getCell('strat');
-                const stratColour = strat === 'Leverage' ? GREEN_OK
-                                  : strat === 'Strategic' ? ACCENT_BLUE
-                                  : strat === 'Bottleneck' ? AMBER_WARN
-                                  : MID_GRAY;
-                stratCell.font = { bold: true, color: { argb: stratColour } };
-            }
+            ws.getCell(`A${r}`).value = cat.name;
+            // Live formula so the workbook ties to 06_Cleaned_Data (Category=col K, Basic Amount=col O)
+            ws.getCell(`B${r}`).value = { formula: `SUMIF('06_Cleaned_Data'!K2:K${lastRow},A${r},'06_Cleaned_Data'!O2:O${lastRow})` };
+            ws.getCell(`B${r}`).numFmt = '#,##0';
+            ws.getCell(`C${r}`).value = { formula: `B${r}/10000000` };
+            ws.getCell(`C${r}`).numFmt = '#,##0.00';
+            ws.getCell(`D${r}`).value = { formula: `B${r}/$B$${totalRowNum}` };
+            ws.getCell(`D${r}`).numFmt = '0.0%';
+            ws.getCell(`E${r}`).value = cat.lines;
+            ws.getCell(`E${r}`).numFmt = '#,##0';
+            r++;
         }
-
-        ws.autoFilter = { from: 'A1', to: 'I1' };
-        ws.views = [{ state: 'frozen', xSplit: 0, ySplit: 1 }];
-    }
-
-    // -----------------------------------------------------------------------
-    // TAB 4: 4_Dim_Org
-    // -----------------------------------------------------------------------
-    private createDimOrg(stats: ReturnType<ExcelGenerator['buildStats']>) {
-        const ws = this.wb.addWorksheet('4_Dim_Org');
-
-        ws.columns = [
-            { header: 'Business_Unit',    key: 'bu',     width: 26 },
-            { header: 'Total_Spend',      key: 'spend',  width: 22 },
-            { header: 'Spend_Share_%',    key: 'share',  width: 18 },
-            { header: 'Tx_Count',         key: 'count',  width: 14 },
-        ];
-        this.styleHeaderRow(ws.getRow(1));
-        ws.getColumn('spend').numFmt = this.curFmt;
-        ws.getColumn('share').numFmt = this.pctFmt;
-
-        const total = stats.totalSpend;
-
-        if (stats.buMap.size === 0) {
-            // No BU column mapped — show a single placeholder row
-            ws.addRow({ bu: '(Business unit column not mapped)', spend: total, share: 1, count: this.data.length });
-        } else {
-            const sorted = [...stats.buMap.entries()].sort((a, b) => b[1] - a[1]);
-            const buCounts = new Map<string, number>();
-            if (this.buKey) {
-                for (const row of this.data) {
-                    const bu = str(row[this.buKey], 'Unknown');
-                    buCounts.set(bu, (buCounts.get(bu) ?? 0) + 1);
-                }
-            }
-            sorted.forEach(([bu, spend], idx) => {
-                const row = ws.addRow({
-                    bu,
-                    spend,
-                    share: total > 0 ? spend / total : 0,
-                    count: buCounts.get(bu) ?? 0,
-                });
-                this.shadeRow(row, idx);
-            });
-        }
-
-        ws.autoFilter = { from: 'A1', to: 'D1' };
-        ws.views = [{ state: 'frozen', xSplit: 0, ySplit: 1 }];
-    }
-
-    // -----------------------------------------------------------------------
-    // TAB 5: 5_Dim_Date
-    // -----------------------------------------------------------------------
-    private createDimDate() {
-        const ws = this.wb.addWorksheet('5_Dim_Date');
-
-        ws.columns = [
-            { header: 'Date',           key: 'dt',     width: 14, numFmt: 'dd/mm/yyyy' },
-            { header: 'Year',           key: 'yr',     width: 8  },
-            { header: 'Month_Num',      key: 'mo',     width: 12 },
-            { header: 'Month_Name',     key: 'mname',  width: 14 },
-            { header: 'Quarter',        key: 'qtr',    width: 10 },
-            { header: 'Fiscal_Year',    key: 'fy',     width: 12 },
-            { header: 'Fiscal_Period',  key: 'fp',     width: 14 },
-            { header: 'Is_Weekend',     key: 'wknd',   width: 12 },
-            { header: 'Week_Number',    key: 'wk',     width: 14 },
-        ];
-        this.styleHeaderRow(ws.getRow(1));
-        ws.getColumn('dt').numFmt = 'dd/mm/yyyy';
-
-        // Collect unique dates from data
-        const dateSet = new Set<string>();
-        for (const row of this.data) {
-            const d = parseDate(row[this.dateKey]);
-            if (d) dateSet.add(d.toISOString().slice(0, 10));
-        }
-
-        const MONTHS = ['January','February','March','April','May','June',
-                        'July','August','September','October','November','December'];
-
-        const sortedDates = [...dateSet].sort();
-        sortedDates.forEach((iso, idx) => {
-            const d   = new Date(iso);
-            const fp  = fiscalPeriod(d);
-            const wk  = Math.ceil(((d.getTime() - new Date(d.getFullYear(), 0, 1).getTime()) / 86400000 + 1) / 7);
-            const row = ws.addRow({
-                dt:    d,
-                yr:    d.getFullYear(),
-                mo:    d.getMonth() + 1,
-                mname: MONTHS[d.getMonth()],
-                qtr:   `Q${Math.ceil((d.getMonth() + 1) / 3)}`,
-                fy:    fp.fiscalYear,
-                fp:    fp.fiscalPeriod,
-                wknd:  [0, 6].includes(d.getDay()) ? 'Y' : 'N',
-                wk,
-            });
-            this.shadeRow(row, idx);
+        // TOTAL row
+        const totalRow = ws.getRow(r);
+        totalRow.getCell(1).value = 'TOTAL';
+        totalRow.getCell(2).value = { formula: `SUM(B4:B${r - 1})` };
+        totalRow.getCell(2).numFmt = '#,##0';
+        totalRow.getCell(3).value = { formula: `B${r}/10000000` };
+        totalRow.getCell(3).numFmt = '#,##0.00';
+        totalRow.getCell(4).value = { formula: `B${r}/$B$${r}` };
+        totalRow.getCell(4).numFmt = '0.0%';
+        totalRow.getCell(5).value = { formula: `SUM(E4:E${r - 1})` };
+        totalRow.getCell(5).numFmt = '#,##0';
+        totalRow.eachCell({ includeEmpty: true }, cell => {
+            cell.font = { bold: true };
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: TOTAL_FILL } };
         });
-
-        ws.autoFilter = { from: 'A1', to: 'I1' };
-        ws.views = [{ state: 'frozen', xSplit: 0, ySplit: 1 }];
     }
 
     // -----------------------------------------------------------------------
-    // TAB 6: 6_KPI_Export
+    // SHEET 03 — Spend by Vendor (Pareto)
     // -----------------------------------------------------------------------
-    private createKpiExport(_stats: ReturnType<ExcelGenerator['buildStats']>) {
-        const ws = this.wb.addWorksheet('6_KPI_Export');
+    private createSpendByVendor(stats: ReturnType<ExcelGenerator['buildStats']>) {
+        const ws = this.wb.addWorksheet('03_Spend_by_Vendor');
+        const widths = [6, 38, 20, 10, 11, 9, 8, 9];
+        widths.forEach((w, i) => (ws.getColumn(i + 1).width = w));
 
-        ws.columns = [
-            { header: 'Year_Month',              key: 'ym',         width: 14 },
-            { header: 'Fiscal_Period',           key: 'fp',         width: 14 },
-            { header: 'Category_L1',             key: 'cat',        width: 22 },
-            { header: 'Business_Unit',           key: 'bu',         width: 22 },
-            { header: 'Total_Spend',             key: 'spend',      width: 20 },
-            { header: 'Tx_Count',                key: 'count',      width: 14 },
-            { header: 'Avg_Transaction',         key: 'avg',        width: 20 },
-            { header: 'Supplier_Count',          key: 'sups',       width: 16 },
-            { header: 'Maverick_Spend',          key: 'mavspend',   width: 20 },
-            { header: 'Maverick_Spend_%',        key: 'mavpct',     width: 18 },
-            { header: 'Spend_Under_Mgmt_%',      key: 'sum',        width: 20 },
-            { header: 'Top3_Supplier_Conc_%',    key: 'top3',       width: 22 },
-            { header: 'MoM_Change_%',            key: 'mom',        width: 16 },
-        ];
-        this.styleHeaderRow(ws.getRow(1));
-        ws.getColumn('spend').numFmt    = this.curFmt;
-        ws.getColumn('avg').numFmt      = this.curFmt;
-        ws.getColumn('mavspend').numFmt = this.curFmt;
-        ws.getColumn('mavpct').numFmt   = this.pctFmt;
-        ws.getColumn('sum').numFmt      = this.pctFmt;
-        ws.getColumn('top3').numFmt     = this.pctFmt;
-        ws.getColumn('mom').numFmt      = this.pctFmt;
+        this.styleTitle(ws.getCell('A1'), 'Spend by Vendor');
+        const note = ws.getCell('A2');
+        note.value = `${stats.uniqueVendors} vendors total. Top 3 = ${(stats.top3Conc * 100).toFixed(1)}% of spend.`;
+        note.font = { italic: true, color: { argb: SUBTLE_TEXT } };
 
-        // Build KPI cube: ym × cat_l1 × bu
-        type KpiKey = string; // `${ym}|${cat_l1}|${bu}`
-        interface KpiCell {
-            ym: string; fp: string; cat: string; bu: string;
-            spend: number; count: number;
-            mavSpend: number; mavCount: number;
-            supSet: Set<string>;
-            supSpend: Map<string, number>;
-        }
-        const cube = new Map<KpiKey, KpiCell>();
+        const hdr = ws.getRow(4);
+        hdr.values = ['Rank', 'Vendor', 'Annual Spend (Rs)', 'Rs Cr', '% of Total', 'Cum %', 'Lines', '# Items'];
+        this.styleHeaderRow(hdr);
 
-        for (const row of this.data) {
-            const d    = parseDate(row[this.dateKey]);
-            const ym   = d ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}` : 'Unknown';
-            const fp   = d ? fiscalPeriod(d).fiscalPeriod : '';
-            const cat  = str(row[this.catL1Key], 'Uncategorized');
-            const bu   = this.buKey ? str(row[this.buKey], 'Unknown') : '(All)';
-            const amt  = parseAmount(row[this.amtKey]);
-            const sup  = str(row[this.supKey], 'Unknown');
-            const mav  = isMaverick(row, this.ctrKey || undefined);
-
-            const key: KpiKey = `${ym}|${cat}|${bu}`;
-            if (!cube.has(key)) {
-                cube.set(key, { ym, fp, cat, bu, spend: 0, count: 0, mavSpend: 0, mavCount: 0, supSet: new Set(), supSpend: new Map() });
-            }
-            const cell = cube.get(key)!;
-            cell.spend   += amt;
-            cell.count++;
-            cell.supSet.add(sup);
-            cell.supSpend.set(sup, (cell.supSpend.get(sup) ?? 0) + amt);
-            if (mav) { cell.mavSpend += amt; cell.mavCount++; }
-        }
-
-        // Sort by ym then cat
-        const rows = [...cube.values()].sort((a, b) =>
-            a.ym.localeCompare(b.ym) || a.cat.localeCompare(b.cat) || a.bu.localeCompare(b.bu)
-        );
-
-        // Build MoM lookup (ym × cat × bu → spend)
-        const prevSpendMap = new Map<string, number>(); // `${cat}|${bu}` → prev spend
-
-        let rowIdx = 0;
-        let prevYm  = '';
-        for (const cell of rows) {
-            const catBuKey = `${cell.cat}|${cell.bu}`;
-
-            // MoM: compare with previous month's same cat+bu
-            let mom = 0;
-            const prevSpend = prevSpendMap.get(catBuKey) ?? 0;
-            if (prevSpend > 0 && cell.ym !== prevYm) {
-                mom = (cell.spend - prevSpend) / prevSpend;
-            }
-            prevYm = cell.ym;
-            prevSpendMap.set(catBuKey, cell.spend);
-
-            // Top-3 supplier concentration within this cube cell
-            const supsSorted = [...cell.supSpend.entries()].sort((a, b) => b[1] - a[1]);
-            const top3 = cell.spend > 0
-                ? supsSorted.slice(0, 3).reduce((s, [, v]) => s + v, 0) / cell.spend
-                : 0;
-
-            const dataRow = ws.addRow({
-                ym:       cell.ym,
-                fp:       cell.fp,
-                cat:      cell.cat,
-                bu:       cell.bu,
-                spend:    cell.spend,
-                count:    cell.count,
-                avg:      cell.count > 0 ? cell.spend / cell.count : 0,
-                sups:     cell.supSet.size,
-                mavspend: cell.mavSpend,
-                mavpct:   cell.spend > 0 ? cell.mavSpend / cell.spend : 0,
-                sum:      cell.spend > 0 ? (cell.spend - cell.mavSpend) / cell.spend : 0,
-                top3,
-                mom,
-            });
-
-            this.shadeRow(dataRow, rowIdx);
-
-            // Colour MoM: red = spend up, green = spend down
-            if (mom !== 0) {
-                dataRow.getCell('mom').font = {
-                    color: { argb: mom > 0 ? RED_CRIT : GREEN_OK }, bold: true
-                };
-            }
-            rowIdx++;
-        }
-
-        ws.autoFilter = { from: 'A1', to: 'M1' };
-        ws.views = [{ state: 'frozen', xSplit: 0, ySplit: 1 }];
+        let cum = 0;
+        let r = 5;
+        stats.vendors.forEach((v, i) => {
+            cum += v.spend;
+            const row = ws.getRow(r);
+            row.values = [
+                i + 1, v.name, v.spend, v.spend / 1e7,
+                stats.totalBasic > 0 ? v.spend / stats.totalBasic : 0,
+                stats.totalBasic > 0 ? cum / stats.totalBasic : 0,
+                v.lines, v.itemCount,
+            ];
+            row.getCell(3).numFmt = '#,##0';
+            row.getCell(4).numFmt = '#,##0.00';
+            row.getCell(5).numFmt = '0.0%';
+            row.getCell(6).numFmt = '0.0%';
+            row.getCell(7).numFmt = '#,##0';
+            row.getCell(8).numFmt = '#,##0';
+            r++;
+        });
+        ws.views = [{ state: 'frozen', ySplit: 4 }];
     }
 
     // -----------------------------------------------------------------------
-    // TAB 7: 7_Data_Quality
+    // SHEET 04 — Multi-Vendor Benchmark
     // -----------------------------------------------------------------------
-    private createDataQuality() {
-        const ws = this.wb.addWorksheet('7_Data_Quality');
+    private createMultiVendorBenchmark(stats: ReturnType<ExcelGenerator['buildStats']>) {
+        const ws = this.wb.addWorksheet('04_MultiVendor_Benchmark');
+        const widths = [14, 40, 24, 8, 10, 14, 18, 14, 14, 28, 9, 18, 10];
+        widths.forEach((w, i) => (ws.getColumn(i + 1).width = w));
 
-        ws.columns = [
-            { header: 'Field_Name',       key: 'field',   width: 28 },
-            { header: 'Mapped_Column',    key: 'mapped',  width: 26 },
-            { header: 'Total_Rows',       key: 'total',   width: 12 },
-            { header: 'Filled_Rows',      key: 'filled',  width: 12 },
-            { header: 'Completeness_%',   key: 'pct',     width: 16 },
-            { header: 'Status',           key: 'status',  width: 12 },
-            { header: 'Visual_Bar',       key: 'bar',     width: 26 },
-        ];
-        this.styleHeaderRow(ws.getRow(1));
-        ws.getColumn('pct').numFmt = this.pctFmt;
+        this.styleTitle(ws.getCell('A1'), 'Multi-Vendor Items — Rate Benchmark');
+        const note = ws.getCell('A2');
+        note.value = `${stats.benchmark.length} items bought from 2+ vendors at a single UOM. Saving = (rate paid − best in-year rate) × qty. Upper bound — validate spec/timing.`;
+        note.font = { italic: true, color: { argb: SUBTLE_TEXT } };
+        ws.mergeCells('A2:M2');
+        note.alignment = { wrapText: true };
 
-        if (this.data.length === 0) return;
+        const hdr = ws.getRow(5);
+        hdr.values = ['Item Code', 'Item Description', 'Category', 'UOM', '# Vendors',
+            'Annual Qty', 'Annual Spend (Rs)', 'Rate Paid (wavg)', 'Best Vendor Rate',
+            'Best Vendor', 'Spread', 'Potential Saving (Rs)', 'Saving %'];
+        this.styleHeaderRow(hdr);
 
-        const total   = this.data.length;
-        const allCols = Object.keys(this.data[0]);
-
-        // Also report on semantically important ETL columns (even if unmapped)
-        const semanticCols: Array<{ field: string; key: string }> = [
-            { field: 'Transaction Date',   key: this.dateKey },
-            { field: 'Amount',             key: this.amtKey },
-            { field: 'Supplier / Vendor',  key: this.supKey },
-            { field: 'Category L1',        key: this.catL1Key },
-            { field: 'Category L2',        key: this.catL2Key },
-            { field: 'Category L3',        key: this.catL3Key },
-            { field: 'Currency',           key: this.curKey },
-            { field: 'Business Unit',      key: this.buKey },
-            { field: 'Plant / Location',   key: this.plantKey },
-            { field: 'PO Number',          key: this.poKey },
-            { field: 'Contract Ref',       key: this.ctrKey },
-            { field: 'Payment Terms',      key: this.ptKey },
-            { field: 'Quantity',           key: this.qtyKey },
-            { field: 'Unit Price',         key: this.upKey },
-            { field: 'Item Description',   key: this.descKey },
-        ].filter(c => c.key); // only those that have a mapped column
-
-        // Semantic cols first, then any remaining raw columns
-        const processedKeys = new Set(semanticCols.map(c => c.key));
-        const remainingCols = allCols.filter(k => !processedKeys.has(k));
-
-        const allEntries = [
-            ...semanticCols.map(c => ({ field: c.field, key: c.key })),
-            ...remainingCols.map(k => ({ field: k, key: k })),
-        ];
-
-        let rowIdx = 0;
-        for (const { field, key } of allEntries) {
-            if (!key) continue;
-            const filled  = this.data.filter(r => r[key] !== null && r[key] !== undefined && r[key] !== '').length;
-            const pct     = total > 0 ? filled / total : 0;
-            const status  = pct > 0.9 ? 'OK' : pct > 0.5 ? 'WARNING' : 'CRITICAL';
-            const barLen  = Math.round(pct * 20);
-            const bar     = '█'.repeat(barLen) + '░'.repeat(20 - barLen);
-
-            const row = ws.addRow({
-                field,
-                mapped: key !== field ? key : '(direct)',
-                total,
-                filled,
-                pct,
-                status,
-                bar,
-            });
-
-            this.shadeRow(row, rowIdx);
-
-            const statusCell = row.getCell('status');
-            const barCell    = row.getCell('bar');
-            const colourArgb = status === 'OK' ? GREEN_OK : status === 'WARNING' ? AMBER_WARN : RED_CRIT;
-            statusCell.font  = { bold: true, color: { argb: colourArgb } };
-            barCell.font     = { color: { argb: colourArgb }, name: 'Courier New', size: 9 };
-
-            rowIdx++;
+        let r = 6;
+        for (const b of stats.benchmark) {
+            const row = ws.getRow(r);
+            row.values = [b.code, b.desc, b.cat, b.uom, b.nVendors, b.qty, b.spend,
+                b.paidWavg, b.bestRate, b.bestVendor, b.spread, b.saving, b.savingPct];
+            row.getCell(6).numFmt = '#,##0';
+            row.getCell(7).numFmt = '#,##0';
+            row.getCell(8).numFmt = '#,##0.00';
+            row.getCell(9).numFmt = '#,##0.00';
+            row.getCell(11).numFmt = '0.0"x"';
+            row.getCell(12).numFmt = '#,##0';
+            row.getCell(13).numFmt = '0.0%';
+            r++;
         }
+        ws.views = [{ state: 'frozen', ySplit: 5 }];
+    }
 
-        ws.autoFilter = { from: 'A1', to: 'G1' };
-        ws.views = [{ state: 'frozen', xSplit: 0, ySplit: 1 }];
+    // -----------------------------------------------------------------------
+    // SHEET 05 — Savings Opportunities (quantified + structural)
+    // -----------------------------------------------------------------------
+    private createSavings(stats: ReturnType<ExcelGenerator['buildStats']>) {
+        const ws = this.wb.addWorksheet('05_Savings_Opportunities');
+        const widths = [4, 30, 44, 18, 18, 22, 44];
+        widths.forEach((w, i) => (ws.getColumn(i + 1).width = w));
+
+        this.styleTitle(ws.getCell('A1'), 'Savings Opportunities — Lever Summary');
+
+        const hdr = ws.getRow(3);
+        hdr.values = ['#', 'Lever', 'What the data shows', 'Spend Touched (Rs)', 'Indicative Saving (Rs)', 'Confidence', 'Action'];
+        this.styleHeaderRow(hdr);
+
+        const fuelCat = stats.categories.find(c => /fuel|biomass|husk/i.test(c.name));
+        const tailSpend = stats.tailVendors.reduce((acc, v) => acc + v.spend, 0);
+
+        const rows: Array<[number | string, string, string, number | string, number | string, string, string]> = [
+            [1, 'Rate harmonisation — multi-vendor',
+                `${stats.benchmark.filter(b => !/fuel|biomass|husk/i.test(b.cat)).length} items bought from 2+ vendors at differing rates (ex-fuel).`,
+                stats.rateHarmonisationSpend, stats.rateHarmonisationSaving, 'Medium',
+                'Procurement to validate spec parity, then move volume to best in-year rate.'],
+            [2, 'Fuel / biomass (timing)',
+                fuelCat ? `Fuel/biomass = ${this.fmtCr(stats.fuelSpend)} (${(stats.fuelSpend / stats.totalBasic * 100).toFixed(1)}% of spend).` : 'No fuel category detected.',
+                stats.fuelSpend, 'see note', 'Low (timing, not vendor)',
+                'Forward/seasonal contracting; benchmark against index, not vendor spread.'],
+            [3, 'Freight billed separately',
+                `${this.fmtCr(stats.totalFreight)} freight invoiced as a separate line.`,
+                stats.totalFreight, stats.totalFreight * 0.15, 'Medium',
+                'Negotiate delivered (FOR) pricing to absorb freight.'],
+            [4, 'Tail-vendor consolidation',
+                `${stats.tailVendors.length} vendors are < Rs 2L/yr each (${this.fmtCr(tailSpend)} total).`,
+                tailSpend, 'see note', 'Process saving',
+                'Consolidate to preferred suppliers; cut PO/processing overhead.'],
+            [5, 'Single-source leverage',
+                'High-spend items sourced from one vendor carry no rate tension.',
+                'see note', 'see note', 'Medium',
+                'Qualify a second source on top single-vendor items to create competition.'],
+            [6, 'Item-master data cleanup',
+                'Generic/catch-all item codes blur attribution and block clean benchmarking.',
+                'see note', 'see note', 'Enabler',
+                'Replace catch-all codes with specific item masters.'],
+        ];
+
+        let r = 4;
+        for (const row of rows) {
+            const xr = ws.getRow(r);
+            xr.values = row as unknown as ExcelJS.CellValue[];
+            if (typeof row[3] === 'number') xr.getCell(4).numFmt = '#,##0';
+            if (typeof row[4] === 'number') xr.getCell(5).numFmt = '#,##0';
+            xr.alignment = { vertical: 'top', wrapText: true };
+            r++;
+        }
+        // Quantified total (rate harmonisation lever 1 at row 4 + freight lever 3 at row 6)
+        const totalRow = ws.getRow(r + 1);
+        totalRow.getCell(2).value = 'Quantified saving range (levers 1 & 3)';
+        totalRow.getCell(5).value = { formula: `E4+E6` };
+        totalRow.getCell(5).numFmt = '#,##0';
+        totalRow.getCell(2).font = { bold: true };
+        totalRow.getCell(5).font = { bold: true };
+
+        const noteRow = ws.getRow(r + 3);
+        noteRow.getCell(2).value = 'Note: fuel/biomass (lever 2) is a timing play, not a vendor-rate play — excluded from the firm range above.';
+        noteRow.getCell(2).font = { italic: true, color: { argb: SUBTLE_TEXT } };
+    }
+
+    // -----------------------------------------------------------------------
+    // SHEET 06 — Cleaned Data (18-column normalised grid)
+    // 02_Spend_by_Category SUMIF depends on this column order: K=Category, O=Basic Amount.
+    // -----------------------------------------------------------------------
+    private createCleanedData() {
+        const ws = this.wb.addWorksheet('06_Cleaned_Data');
+        const cols: Array<{ h: string; w: number; numFmt?: string }> = [
+            { h: 'S.No', w: 7 },
+            { h: 'MRN No', w: 11 },
+            { h: 'MRN Date', w: 12 },
+            { h: 'Bill No', w: 14 },
+            { h: 'PO No', w: 14 },
+            { h: 'Vendor', w: 30 },
+            { h: 'State', w: 10 },
+            { h: 'Item Code', w: 14 },
+            { h: 'Item Description', w: 40 },
+            { h: 'HSN/SAC', w: 12 },          // J
+            { h: 'Category', w: 26 },          // K  ← SUMIF key
+            { h: 'Qty Rcvd', w: 11, numFmt: '#,##0.00' },
+            { h: 'UOM', w: 8 },
+            { h: 'Net Rate', w: 12, numFmt: '#,##0.00' },
+            { h: 'Basic Amount (Rs)', w: 16, numFmt: '#,##0.00' },  // O  ← SUMIF value
+            { h: 'Freight (Rs)', w: 12, numFmt: '#,##0.00' },
+            { h: 'Gross Amt (Rs)', w: 14, numFmt: '#,##0.00' },
+            { h: 'Department', w: 16 },
+        ];
+        ws.columns = cols.map(c => ({ header: c.h, width: c.w }));
+        this.styleHeaderRow(ws.getRow(1));
+        cols.forEach((c, i) => { if (c.numFmt) ws.getColumn(i + 1).numFmt = c.numFmt; });
+
+        let r = 2;
+        this.data.forEach((row, i) => {
+            const xr = ws.getRow(r);
+            xr.values = [
+                i + 1,
+                str(row[this.mrnNoKey]),
+                fmtDate(parseDate(row[this.dateKey])),
+                str(row[this.billNoKey]),
+                str(row[this.poNoKey]),
+                str(row[this.supKey]),
+                str(row[this.stateKey]),
+                str(row[this.itemKey]),
+                str(row[this.descKey]),
+                str(row[this.hsnKey]),
+                str(row[this.catKey], 'Other / Uncategorized'),
+                parseAmount(row[this.qtyKey]),
+                str(row[this.uomKey]),
+                parseAmount(row[this.rateKey]),
+                parseAmount(row[this.amtKey]),
+                parseAmount(row[this.freightKey]),
+                parseAmount(row[this.grossKey]),
+                str(row[this.deptKey]),
+            ];
+            r++;
+        });
+        ws.views = [{ state: 'frozen', ySplit: 1 }];
+        ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: 18 } };
     }
 }
