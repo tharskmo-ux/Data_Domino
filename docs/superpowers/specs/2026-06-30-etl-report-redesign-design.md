@@ -8,6 +8,13 @@
 
 The current Excel export is not a meaningful analyst deliverable. Depending on the build, users either get an older report (ABC-style content, no savings) or the newly committed 7-sheet generator (savings, but no ABC analysis and no temporal/organizational/risk lenses). Neither is the complete, decision-driving report procurement teams expect.
 
+## Dependency (build order)
+
+This redesign assumes line items carry a real `Category_L1`. On validated client
+data they do not — categories must be derived first. **Build
+`2026-06-30-auto-categorization-design.md` BEFORE this**; otherwise every
+category/savings/ABC sheet collapses to a single "Uncategorized" bucket.
+
 ## Goal
 
 Produce a single, curated 11-sheet workbook that reads as a professional spend-analysis deliverable: **diagnose → trends → risk → savings → evidence**. Keep the existing public surface so the call site is unchanged.
