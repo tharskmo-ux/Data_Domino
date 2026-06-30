@@ -85,10 +85,22 @@ For each row, stop at the first pass that assigns a category:
    against a keyword→category rule list (e.g. `bolt|nut|screw|washer` → Metals &
    Hardware; `yarn|fibre|cotton` → Fibres & Yarn; `grease|lubricant|oil` →
    Lubricants & Oils). Records `source = 'keyword'`.
-3. **AI pass (Gemini).** Collect the still-unknown **unique** descriptions, batch
-   them to a new `categorizeItems` Cloud Function constrained to the taxonomy list,
-   cache results by description. Records `source = 'ai'`. Any leftover → `Other /
-   Review`, `source = 'unmapped'`.
+3. **AI pass (pluggable LLM — local-first).** Collect the still-unknown **unique**
+   descriptions, batch them to an LLM constrained to the taxonomy list, cache results
+   by description. Records `source = 'ai'`. Any leftover → `Other / Review`,
+   `source = 'unmapped'`.
+
+   The LLM is a **swappable adapter** behind one interface
+   `classify(descriptions: string[], taxonomy: string[]): Promise<string[]>`:
+   - **Local (Ollama)** — default for internal runs; free, private, offline. Calls
+     `http://localhost:11434` with a small instruct model (e.g. `llama3.1`/`qwen2.5`).
+   - **In-browser (WebLLM/transformers.js)** — for browser clients with no backend.
+   - **Cloud (Gemini)** — the `categorizeItems` Cloud Function, for hosted multi-client.
+   - **None** — skip pass 3; leftovers go straight to `Other / Review`.
+
+   The cascade NEVER hard-depends on an LLM: passes 1–2 are fully deterministic and
+   offline, and pass 3 is optional. Provider is chosen by config
+   (`VITE_CATEGORIZER_LLM = ollama | webllm | gemini | none`).
 
 Each row gains `category_l1`, `category_source` (`hsn|keyword|ai|manual|unmapped`),
 and a coarse `confidence` (hsn/keyword = high, ai = medium). Manual edits in the UI
@@ -101,12 +113,16 @@ src/utils/categorization/
   taxonomy.ts      category list + HSN-chapter/heading → category table (config)
   hsnMap.ts        resolveByHsn(code): { category, ok } — chapter+override lookup
   keywordRules.ts  rule list + resolveByKeyword(desc): { category, ok }
-  categorize.ts    categorize(rows, {hsnKey, descKey}, aiFn?): pure cascade
-  types.ts         CategoryResult, Provenance
+  categorize.ts    categorize(rows, {hsnKey, descKey}, classify?): pure cascade
+  types.ts         CategoryResult, Provenance, ClassifyFn
+  llm/
+    index.ts       getClassifier(): picks adapter from VITE_CATEGORIZER_LLM
+    ollama.ts      local Ollama adapter (default)
+    webllm.ts      in-browser adapter
+    gemini.ts      cloud adapter → categorizeItems callable
 functions/
   index.js         + categorizeItems callable (Gemini, taxonomy-constrained, auth-guarded)
-src/services/
-  categorizationService.ts  thin client for categorizeItems (httpsCallable)
+                   — only needed for the cloud adapter
 src/features/etl/
   CategoryMapper.tsx        + "Auto-categorize" button → runs cascade, fills column,
                             shows coverage by source; existing manual override kept
