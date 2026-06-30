@@ -35,9 +35,12 @@ jobs:
         run: npm run build
 
       - name: Deploy to Firebase Hosting (live)
-        uses: FirebaseExtended/action-hosting-deploy@v0
-        with:
-          repoToken: ${{ secrets.GITHUB_TOKEN }}
-          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
-          channelId: live
-          projectId: antigravity-data-domino
+        # Direct firebase-tools deploy via a service-account file. Clean exit code =
+        # true deploy result (the action-hosting-deploy wrapper reports false failures
+        # on its post-deploy PR-comment step).
+        env:
+          FIREBASE_SA: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/firebase-sa.json
+        run: |
+          printf '%s' "$FIREBASE_SA" > "$GOOGLE_APPLICATION_CREDENTIALS"
+          npx firebase-tools@latest deploy --only hosting --project antigravity-data-domino --non-interactive
