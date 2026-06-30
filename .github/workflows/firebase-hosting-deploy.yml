@@ -1,0 +1,43 @@
+name: Deploy to Firebase Hosting
+
+# Auto-deploy the frontend to Firebase Hosting on every push to master.
+# Requires two GitHub repository secrets (Settings -> Secrets and variables -> Actions):
+#   ENV_FILE                 -> the full contents of the production .env (Vite needs these at build time)
+#   FIREBASE_SERVICE_ACCOUNT -> a Firebase service-account JSON key (deploy credential)
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch: {} # allow manual runs from the Actions tab
+
+jobs:
+  build_and_deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Write production .env
+        # Vite bakes VITE_* vars in at build time. Without this the build would
+        # fall back to PLACEHOLDER values and ship in demo mode.
+        run: printf '%s\n' "${{ secrets.ENV_FILE }}" > .env
+
+      - name: Build
+        run: npm run build
+
+      - name: Deploy to Firebase Hosting (live)
+        uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          repoToken: ${{ secrets.GITHUB_TOKEN }}
+          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          channelId: live
+          projectId: antigravity-data-domino
