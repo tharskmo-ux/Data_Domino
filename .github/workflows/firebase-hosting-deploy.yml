@@ -2,13 +2,18 @@ name: Deploy to Firebase Hosting
 
 # Auto-deploy the frontend to Firebase Hosting on every push to master.
 # Requires two GitHub repository secrets (Settings -> Secrets and variables -> Actions):
-#   ENV_FILE                 -> the full contents of the production .env (Vite needs these at build time)
-#   FIREBASE_SERVICE_ACCOUNT -> a Firebase service-account JSON key (deploy credential)
+#   ENV_FILE       -> the full contents of the production .env (Vite needs these at build time)
+#   FIREBASE_TOKEN -> a Firebase CI token from `firebase login:ci`
 
 on:
   push:
     branches: [master]
   workflow_dispatch: {} # allow manual runs from the Actions tab
+
+# Only one deploy at a time; cancel an older in-flight run when a newer push lands.
+concurrency:
+  group: firebase-hosting
+  cancel-in-progress: true
 
 jobs:
   build_and_deploy:
@@ -35,6 +40,18 @@ jobs:
         run: npm run build
 
       - name: Deploy to Firebase Hosting (live)
-        # Deploy with a Firebase CI token (FIREBASE_TOKEN secret from `firebase login:ci`).
-        # Single-string credential with the owner's permissions — robust in CI.
-        run: npx firebase-tools@latest deploy --only hosting --project antigravity-data-domino --non-interactive --token "${{ secrets.FIREBASE_TOKEN }}"
+        # firebase-tools occasionally retries the "release" API call and the retry
+        # returns HTTP 400 "is the current active version" even though the deploy
+        # already succeeded. Treat that specific case as success; fail on anything else.
+        run: |
+          set +e
+          out=$(npx firebase-tools@latest deploy --only hosting \
+            --project antigravity-data-domino --non-interactive \
+            --token "${{ secrets.FIREBASE_TOKEN }}" 2>&1)
+          code=$?
+          echo "$out"
+          if [ $code -ne 0 ] && echo "$out" | grep -q "is the current active version"; then
+            echo "::notice::Release already active (firebase-tools retry) — deploy succeeded; treating as success."
+            exit 0
+          fi
+          exit $code
