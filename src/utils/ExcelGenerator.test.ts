@@ -4,12 +4,16 @@ import { ExcelGenerator, stateName } from './ExcelGenerator';
 
 describe('stateName', () => {
   it('maps GST codes and abbreviations to full names', () => {
-    expect(stateName('03/PB')).toBe('Punjab');
+    expect(stateName('03/ PB')).toBe('Punjab');   // real Aarti format (with space)
+    expect(stateName('27/ MH')).toBe('Maharashtra');
     expect(stateName('24-GUJARAT')).toBe('Gujarat');
     expect(stateName('27ABCDE1234F1Z5')).toBe('Maharashtra'); // GSTIN
-    expect(stateName('/ PB')).toBe('Punjab'); // code lost, abbreviation only
+    expect(stateName('/ PB')).toBe('Punjab');     // code lost, abbreviation only
+    expect(stateName('0/ PB')).toBe('Punjab');
     expect(stateName('IM/ FRANCE')).toBe('Import');
     expect(stateName('IM/ NC')).toBe('Import');
+    expect(stateName('PA/ NEW TAIPEI')).toBe('Import'); // foreign origin
+    expect(stateName('TE/')).toBe('Import');
     expect(stateName('')).toBe('Unspecified');
   });
 });
@@ -69,6 +73,15 @@ describe('ExcelGenerator — 11-sheet report', () => {
     const wb = await loadWorkbook();
     const t = sheetText(wb.getWorksheet('07_Supplier_Concentration')!);
     expect(t).toContain('HHI');
+  });
+
+  it('Savings sheet is two clear sections with no dangling "see note"', async () => {
+    const wb = await loadWorkbook();
+    const t = sheetText(wb.getWorksheet('09_Savings_Opportunities')!);
+    expect(t).toContain('QUANTIFIED SAVINGS');
+    expect(t).toContain('ADDITIONAL OPPORTUNITIES');
+    expect(t).toContain('Why not a firm number yet');
+    expect(t).not.toMatch(/see note/i);
   });
 
   it('Trend sheet buckets by month', async () => {

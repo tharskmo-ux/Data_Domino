@@ -21,8 +21,14 @@ describe('3-level hierarchy (user examples)', () => {
   it('Paper Tube → Paper & Packaging / Packaging / Paper Tube', () => {
     expect(full('48221000', 'PAPER TUBE 68 DIA 40MM')).toEqual({ l1: 'Paper & Packaging', l2: 'Packaging', l3: 'Paper Tube' });
   });
-  it('Bar Code Sticker → Paper & Packaging / Packaging / Stickers', () => {
-    expect(full('48211000', 'BAR CODE STICKER ROLL')).toEqual({ l1: 'Paper & Packaging', l2: 'Packaging', l3: 'Stickers' });
+  it('Bar Code Sticker → Paper & Packaging / Labels & Stickers / Stickers', () => {
+    expect(full('48211000', 'BAR CODE STICKER ROLL')).toEqual({ l1: 'Paper & Packaging', l2: 'Labels & Stickers', l3: 'Stickers' });
+  });
+  it('Rice Husk → Agri & Biomass Fuel / Biomass Fuel / Rice Husk', () => {
+    expect(full('12130000', 'RICE HUSK')).toEqual({ l1: 'Agri & Biomass Fuel', l2: 'Biomass Fuel', l3: 'Rice Husk' });
+  });
+  it('Cardamom (spice) → Food & Agri / Spices / Cardamom (not Biomass Fuel)', () => {
+    expect(full('09083100', 'CARDAMOM GREEN')).toEqual({ l1: 'Food & Agri Products', l2: 'Spices', l3: 'Cardamom' });
   });
 
   it('graceful fallback with no HSN: L2 falls back to L1, L3 from keyword', () => {

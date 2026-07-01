@@ -159,6 +159,9 @@ export function stateName(raw: any): string {
     // A bare 2-letter state abbreviation anywhere in the value (e.g. "/ PB").
     const ab = s.toUpperCase().match(/\b([A-Z]{2})\b/);
     if (ab && STATE_ABBR[ab[1]]) return STATE_ABBR[ab[1]];
+    // Any remaining slash-coded value is a foreign / import origin in this ERP format
+    // (e.g. "PA/ NEW TAIPEI", "TE/", "MO/", "FO/") — group them as Import.
+    if (s.includes('/')) return 'Import';
     // Already a name (possibly prefixed like "03-PUNJAB"): strip a leading code.
     return s.replace(/^\d{2}[\s/\-]*/, '').trim() || s;
 }
@@ -708,85 +711,100 @@ export class ExcelGenerator {
     // SHEET 05 — Savings Opportunities (quantified + structural)
     // -----------------------------------------------------------------------
     private createSavings(stats: ReturnType<ExcelGenerator['buildStats']>) {
-        const ws = this.wb.addWorksheet(SHEETS.savings);
-        const widths = [4, 30, 44, 18, 18, 22, 44];
+        const ws = this.wb.addWorksheet(SHEETS.savings, { views: [{ showGridLines: false }] });
+        const widths = [26, 50, 18, 40, 46];
         widths.forEach((w, i) => (ws.getColumn(i + 1).width = w));
 
-        this.styleTitle(ws.getCell('A1'), 'Savings Opportunities — Lever Summary');
+        this.styleTitle(ws.getCell('A1'), 'Savings Opportunities');
+        const intro = ws.getCell('A2');
+        intro.value = 'Where procurement spend can be reduced. Section A = firm, negotiable numbers. Section B = real opportunities that need analysis before a rupee figure can be put on them.';
+        intro.font = { italic: true, color: { argb: SUBTLE_TEXT } };
+        ws.mergeCells('A2:E2');
+        intro.alignment = { wrapText: true };
 
-        const hdr = ws.getRow(3);
-        hdr.values = ['#', 'Lever', 'What the data shows', 'Spend Touched (Rs)', 'Indicative Saving (Rs)', 'Confidence', 'Action'];
-        this.styleHeaderRow(hdr);
-
-        const fuelCat = stats.categories.find(c => /fuel|biomass|husk/i.test(c.name));
         const tailSpend = stats.tailVendors.reduce((acc, v) => acc + v.spend, 0);
         const singleSourceSpend = stats.singleSource.reduce((acc, it) => acc + it.spend, 0);
+        const freightSaving = stats.totalFreight * 0.15;
+        const quantified = stats.rateHarmonisationSaving + freightSaving;
+        const fuelPct = stats.totalBasic ? (stats.fuelSpend / stats.totalBasic * 100).toFixed(1) : '0';
 
-        // Each lever's "Indicative Saving" is either a rupee number (firm, negotiable)
-        // or a short qualitative label with a [n] pointer to the NOTES block below —
-        // so there are no dangling "see note" cells.
-        const rows: Array<[number | string, string, string, number | string, number | string, string, string]> = [
-            [1, 'Rate harmonisation — multi-vendor',
-                `${stats.benchmark.filter(b => !/fuel|biomass|husk/i.test(b.cat)).length} items bought from 2+ vendors at differing rates (ex-fuel).`,
-                stats.rateHarmonisationSpend, stats.rateHarmonisationSaving, 'Medium',
-                'Procurement to validate spec parity, then move volume to best in-year rate.'],
-            [2, 'Fuel / biomass (timing)',
-                fuelCat ? `Fuel/biomass = ${this.fmtCr(stats.fuelSpend)} (${(stats.fuelSpend / stats.totalBasic * 100).toFixed(1)}% of spend).` : 'No fuel category detected.',
-                stats.fuelSpend, 'Timing play — note [1]', 'Low (timing, not vendor)',
-                'Forward/seasonal contracting; benchmark against index, not vendor spread.'],
-            [3, 'Freight billed separately',
-                `${this.fmtCr(stats.totalFreight)} freight invoiced as a separate line.`,
-                stats.totalFreight, stats.totalFreight * 0.15, 'Medium',
-                'Negotiate delivered (FOR) pricing to absorb freight.'],
-            [4, 'Tail-vendor consolidation',
-                `${stats.tailVendors.length} vendors are < Rs 2L/yr each (${this.fmtCr(tailSpend)} total).`,
-                tailSpend, 'Process saving — note [2]', 'Process',
-                'Consolidate to preferred suppliers; cut PO/processing overhead.'],
-            [5, 'Single-source leverage',
-                `${stats.singleSource.length.toLocaleString('en-IN')} items sourced from a single vendor carry no rate tension.`,
-                singleSourceSpend, 'Risk reduction — note [3]', 'Medium',
-                'Qualify a second source on top single-vendor items to create competition.'],
-            [6, 'Item-master data cleanup',
-                'Generic/catch-all item codes blur attribution and block clean benchmarking.',
-                '—', 'Enabler — note [4]', 'Enabler',
-                'Replace catch-all codes with specific item masters.'],
-        ];
-
+        // Headline number
         let r = 4;
-        for (const row of rows) {
+        const head = ws.getCell(`A${r}`);
+        head.value = `Estimated quantified saving: ${this.fmtCr(quantified)}  —  from the firm levers in Section A`;
+        head.font = { bold: true, size: 14, color: { argb: TITLE_TEXT } };
+        ws.mergeCells(`A${r}:E${r}`);
+        r += 2;
+
+        // ---- SECTION A — quantified, negotiable now ----
+        ws.getCell(`A${r}`).value = 'A.  QUANTIFIED SAVINGS  —  negotiable now';
+        ws.getCell(`A${r}`).font = { bold: true, size: 12, color: { argb: HEADER_FILL } };
+        r++;
+        let hdr = ws.getRow(r);
+        hdr.values = ['Opportunity', 'What we found', 'Spend involved (Rs)', 'Est. saving (Rs)', 'What to do'];
+        this.styleHeaderRow(hdr); r++;
+        const quantRows: Array<[string, string, number, number, string]> = [
+            ['Rate harmonisation',
+                `${stats.benchmark.filter(b => !/fuel|biomass|husk/i.test(b.cat)).length} items are bought from 2 or more vendors at different rates. Moving volume to the cheapest rate captures the gap.`,
+                stats.rateHarmonisationSpend, stats.rateHarmonisationSaving,
+                'Confirm the items are the same spec, then shift volume to the lowest in-year vendor rate.'],
+            ['Freight billed separately',
+                `${this.fmtCr(stats.totalFreight)} of freight is invoiced as a separate line. Delivered pricing typically absorbs ~15%.`,
+                stats.totalFreight, freightSaving,
+                'Ask key vendors for delivered (FOR) prices so freight is built into the unit rate.'],
+        ];
+        const firstQ = r;
+        for (const row of quantRows) {
             const xr = ws.getRow(r);
             xr.values = row as unknown as ExcelJS.CellValue[];
-            if (typeof row[3] === 'number') xr.getCell(4).numFmt = '#,##0';
-            if (typeof row[4] === 'number') xr.getCell(5).numFmt = '#,##0';
+            xr.getCell(3).numFmt = '#,##0'; xr.getCell(4).numFmt = '#,##0';
             xr.alignment = { vertical: 'top', wrapText: true };
+            ws.getRow(r).height = 44;
             r++;
         }
-        // Quantified total = firm, negotiable levers only (rate harmonisation + freight).
-        const totalRow = ws.getRow(r + 1);
-        totalRow.getCell(2).value = 'Quantified saving range (firm levers 1 & 3 only)';
-        totalRow.getCell(5).value = { formula: `E4+E6` };
-        totalRow.getCell(5).numFmt = '#,##0';
-        totalRow.getCell(2).font = { bold: true };
-        totalRow.getCell(5).font = { bold: true };
-
-        // NOTES / METHOD — explains every qualitative lever referenced above.
+        const tot = ws.getRow(r);
+        tot.getCell(1).value = 'TOTAL — Section A';
+        tot.getCell(4).value = { formula: `D${firstQ}+D${firstQ + 1}` };
+        tot.getCell(4).numFmt = '#,##0';
+        tot.getCell(1).font = { bold: true }; tot.getCell(4).font = { bold: true };
+        [1, 3, 4].forEach((c) => { tot.getCell(c).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: TOTAL_FILL } }; });
         r += 3;
-        ws.getCell(`B${r}`).value = 'NOTES / METHOD';
-        ws.getCell(`B${r}`).font = { bold: true, size: 12, color: { argb: HEADER_FILL } };
+
+        // ---- SECTION B — opportunities that need analysis ----
+        ws.getCell(`A${r}`).value = 'B.  ADDITIONAL OPPORTUNITIES  —  need analysis to put a number on';
+        ws.getCell(`A${r}`).font = { bold: true, size: 12, color: { argb: HEADER_FILL } };
         r++;
-        const notes = [
-            '[1] Fuel/biomass saving is a timing play (forward or index-linked contracting), not a vendor-rate play. It is real but not quantified here because it depends on market timing, not negotiation.',
-            '[2] Tail-vendor consolidation saves PO/processing and admin overhead, not unit price — a process saving rather than a rupee figure on spend.',
-            '[3] Single-source leverage reduces dependency risk. Savings materialise only after a second source is qualified and used to negotiate — hence "risk reduction", not a booked number.',
-            '[4] Item-master cleanup is an enabler: clean codes make future benchmarking possible. No direct saving, but it unlocks levers 1 and 5.',
-            'The "Quantified saving range" above deliberately sums only the firm, negotiable levers (rate harmonisation + freight).',
+        hdr = ws.getRow(r);
+        hdr.values = ['Opportunity', 'What we found', 'Spend involved (Rs)', 'Why not a firm number yet', 'What to do'];
+        this.styleHeaderRow(hdr); r++;
+        const qualRows: Array<[string, string, number | string, string, string]> = [
+            ['Fuel / biomass timing',
+                `Fuel & biomass is ${this.fmtCr(stats.fuelSpend)} (${fuelPct}% of spend).`,
+                stats.fuelSpend,
+                'The saving comes from buying at the right time (forward / index-linked contracts), not from switching vendors — so it depends on market timing.',
+                'Contract forward or against a price index; benchmark against the index, not against other vendors.'],
+            ['Tail-vendor consolidation',
+                `${stats.tailVendors.length} vendors are under Rs 2L/yr each (${this.fmtCr(tailSpend)} total).`,
+                tailSpend,
+                'The saving is in cutting PO and admin overhead, not in unit price — a process / efficiency saving.',
+                'Consolidate these onto a few preferred suppliers to reduce processing cost.'],
+            ['Single-source leverage',
+                `${stats.singleSource.length.toLocaleString('en-IN')} items come from only one vendor (${this.fmtCr(singleSourceSpend)}).`,
+                singleSourceSpend,
+                'With no competing quote there is no rate tension. A saving only appears after a 2nd source is qualified and used to negotiate.',
+                'Qualify a second source on the highest-spend single-vendor items.'],
+            ['Item-master cleanup',
+                'Generic / catch-all item codes blur what was actually bought.',
+                '—',
+                'This is an enabler, not a direct saving — clean codes make the levers above measurable.',
+                'Replace catch-all codes with specific item descriptions.'],
         ];
-        for (const n of notes) {
-            const c = ws.getCell(`B${r}`);
-            c.value = n;
-            c.font = { size: 10, color: { argb: SUBTLE_TEXT } };
-            c.alignment = { wrapText: true, vertical: 'top' };
-            ws.getRow(r).height = 26;
+        for (const row of qualRows) {
+            const xr = ws.getRow(r);
+            xr.values = row as unknown as ExcelJS.CellValue[];
+            if (typeof row[2] === 'number') xr.getCell(3).numFmt = '#,##0';
+            xr.alignment = { vertical: 'top', wrapText: true };
+            ws.getRow(r).height = 50;
             r++;
         }
     }

@@ -28,9 +28,8 @@ export const TAXONOMY = [
 
 // [chapterLow, chapterHigh, category]
 const CHAPTER_RANGES: Array<[number, number, string]> = [
-  [1, 5, 'Food & Agri Products'],
-  [6, 14, 'Agri & Biomass Fuel'],
-  [15, 24, 'Food & Agri Products'],
+  [1, 24, 'Food & Agri Products'], // dairy, meat, veg, fruit, spices, cereals, prepared food
+  // (biomass fuel like rice husk is pulled out by HSN heading override below)
   [25, 25, 'Building Materials'],
   [26, 26, 'Metals & Minerals'],
   [27, 27, 'Fuel & Energy'],
@@ -64,6 +63,10 @@ const CHAPTER_RANGES: Array<[number, number, string]> = [
 export const HSN_HEADING_OVERRIDES: Record<string, string> = {
   '3403': 'Lubricants & Oils', // lubricating preparations
   '3004': 'Pharma & Medical',  // medicaments
+  '1213': 'Agri & Biomass Fuel', // cereal straw & husks (rice husk) — used as boiler fuel
+  '1214': 'Agri & Biomass Fuel', // swedes, fodder roots, forage
+  '4401': 'Agri & Biomass Fuel', // fuel wood, wood chips, sawdust briquettes
+  '4402': 'Agri & Biomass Fuel', // wood charcoal
 };
 
 export function chapterToCategory(chapter: number): string | undefined {
