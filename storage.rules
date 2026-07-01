@@ -1,0 +1,21 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function isAdmin() {
+      return request.auth != null &&
+        firestore.get(/databases/(default)/documents/user_roles/$(request.auth.uid)).data.role == 'admin';
+    }
+    function owns(userId) { return request.auth != null && request.auth.uid == userId; }
+
+    // Raw uploads incl. nested project files (raw_grid.json, category_results.json)
+    match /uploads/{userId}/{allPaths=**} {
+      allow read, write: if owns(userId) || isAdmin();
+    }
+    // Exports — admin may write on a client's behalf (Admin View Mode)
+    match /exports/{userId}/{allPaths=**} {
+      allow read, write: if owns(userId) || isAdmin();
+    }
+    // Deny everything else
+    match /{allPaths=**} { allow read, write: if false; }
+  }
+}
