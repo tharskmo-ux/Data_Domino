@@ -73,9 +73,46 @@ describe('ExcelGenerator — 11-sheet report', () => {
     let colTotal = 0;
     ws.eachRow((row, n) => {
       if (n === 1) return; // header
-      const v = Number(row.getCell(15).value); // column O = Basic Amount (Rs)
+      const v = Number(row.getCell(17).value); // column Q = Basic Amount (after adding L2/L3) (Rs)
       if (!Number.isNaN(v)) colTotal += v;
     });
     expect(colTotal).toBe(inputTotal);
+  });
+});
+
+describe('ExcelGenerator — data hygiene', () => {
+  const headerRow: Record<string, any> = {
+    'MRN DATE': 'MRN DATE', 'PARTY NAME': 'PARTY NAME', 'ITEM CODE': 'ITEM CODE',
+    'ITEM DESC.': 'ITEM DESC.', 'HSN/SAC CODE': 'HSN/SAC CODE', 'QTY RCVD.': 'QTY RCVD.',
+    'NET RATE': 'NET RATE', 'BASIC AMOUNT': 'BASIC AMOUNT', 'DEPARTMENT': 'DEPARTMENT',
+    'STATE CODE /NAME': 'STATE CODE /NAME', category: '', category_l2: '', category_l3: '',
+  };
+  const dirty: Array<Record<string, any>> = [
+    headerRow, // a repeated header row that must be dropped
+    { 'MRN DATE': '2025-04-01', 'PARTY NAME': 'Alpha', 'ITEM CODE': 'IT1', 'ITEM DESC.': 'Cotton Yarn', 'HSN/SAC CODE': '52051110', 'QTY RCVD.': 10, 'NET RATE': 250, 'BASIC AMOUNT': 250000, 'DEPARTMENT': 'SPIN', 'STATE CODE /NAME': '03/PB', category: 'Fibres & Yarn', category_l2: 'Cotton', category_l3: 'Cotton Yarn' },
+    { 'MRN DATE': '2025-04-02', 'PARTY NAME': 'Beta', 'ITEM CODE': 'IT2', 'ITEM DESC.': 'Bolt', 'HSN/SAC CODE': '73181500', 'QTY RCVD.': 5, 'NET RATE': 12, 'BASIC AMOUNT': 6000, 'DEPARTMENT': 'MECH', 'STATE CODE /NAME': '24-GUJARAT', category: 'Metals & Hardware', category_l2: 'Fasteners', category_l3: 'Bolt' },
+  ];
+
+  it('drops repeated header rows, converts state codes, shows L1/L2/L3', async () => {
+    const blob = await new ExcelGenerator(dirty, {}, 'INR').generate();
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(await blob.arrayBuffer());
+    const ws = wb.getWorksheet('10_Cleaned_Data')!;
+
+    // header row filtered -> only 2 data rows
+    let dataRows = 0;
+    ws.eachRow((row, n) => { if (n > 1 && row.getCell(6).value) dataRows++; });
+    expect(dataRows).toBe(2);
+
+    const hdr = (ws.getRow(1).values as any[]).map((v) => String(v));
+    expect(hdr).toContain('Category L1');
+    expect(hdr).toContain('Category L2');
+    expect(hdr).toContain('Category L3');
+
+    const t = sheetText(ws);
+    expect(t).toContain('Punjab');   // 03/PB -> Punjab
+    expect(t).toContain('Gujarat');  // 24-GUJARAT -> Gujarat
+    expect(t).not.toContain('03/PB');
+    expect(t).toContain('Cotton Yarn'); // L3 value present
   });
 });

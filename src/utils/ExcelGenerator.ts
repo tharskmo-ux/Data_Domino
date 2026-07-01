@@ -120,6 +120,44 @@ function resolveKey(sample: DataRow | undefined, candidates: (string | undefined
 }
 
 // ---------------------------------------------------------------------------
+// GST state codes → full state names. GSTIN and "State Code/Name" fields lead with
+// the 2-digit GST state code (e.g. "03/PB", "24-GUJARAT", "27ABCDE...").
+// ---------------------------------------------------------------------------
+const GST_STATE: Record<string, string> = {
+    '01': 'Jammu & Kashmir', '02': 'Himachal Pradesh', '03': 'Punjab', '04': 'Chandigarh',
+    '05': 'Uttarakhand', '06': 'Haryana', '07': 'Delhi', '08': 'Rajasthan', '09': 'Uttar Pradesh',
+    '10': 'Bihar', '11': 'Sikkim', '12': 'Arunachal Pradesh', '13': 'Nagaland', '14': 'Manipur',
+    '15': 'Mizoram', '16': 'Tripura', '17': 'Meghalaya', '18': 'Assam', '19': 'West Bengal',
+    '20': 'Jharkhand', '21': 'Odisha', '22': 'Chhattisgarh', '23': 'Madhya Pradesh', '24': 'Gujarat',
+    '25': 'Daman & Diu', '26': 'Dadra & Nagar Haveli', '27': 'Maharashtra', '28': 'Andhra Pradesh (Old)',
+    '29': 'Karnataka', '30': 'Goa', '31': 'Lakshadweep', '32': 'Kerala', '33': 'Tamil Nadu',
+    '34': 'Puducherry', '35': 'Andaman & Nicobar', '36': 'Telangana', '37': 'Andhra Pradesh',
+    '38': 'Ladakh', '97': 'Other Territory',
+};
+
+/** Resolve a raw state / GSTIN / "03/PB" value to a full state name. */
+function stateName(raw: any): string {
+    const s = String(raw ?? '').trim();
+    if (!s) return 'Unspecified';
+    const code = s.slice(0, 2);
+    if (GST_STATE[code]) return GST_STATE[code];
+    const m = s.match(/\b(\d{2})\b/);
+    if (m && GST_STATE[m[1]]) return GST_STATE[m[1]];
+    // Already a name (possibly prefixed like "03-PUNJAB"): strip a leading code.
+    return s.replace(/^\d{2}[\s/\-]*/, '').trim() || s;
+}
+
+/** Detect repeated header rows that some ERP exports leave inside the data. */
+function looksLikeHeader(row: DataRow, amtKey: string, supKey: string, descKey: string): boolean {
+    // A genuine amount is numeric; a header row carries text like "BASIC AMOUNT".
+    if (/[A-Za-z]{2,}/.test(String(row[amtKey] ?? ''))) return true;
+    const HEADERS = new Set(['PARTY NAME', 'VENDOR', 'SUPPLIER', 'ITEM DESC.', 'ITEM DESC', 'ITEM DESCRIPTION', 'BASIC AMOUNT']);
+    if (HEADERS.has(String(row[supKey] ?? '').trim().toUpperCase())) return true;
+    if (HEADERS.has(String(row[descKey] ?? '').trim().toUpperCase())) return true;
+    return false;
+}
+
+// ---------------------------------------------------------------------------
 // Sheet names — centralised so the order/numbering and the SUMIF cross-reference
 // to the cleaned-data sheet can never drift apart.
 // ---------------------------------------------------------------------------
@@ -160,7 +198,9 @@ export class ExcelGenerator {
     // resolved column keys
     private amtKey: string;     // BASIC AMOUNT (pre-tax spend)
     private supKey: string;     // PARTY NAME / vendor
-    private catKey: string;     // Category
+    private catKey: string;     // Category L1
+    private l2Key: string;      // Category L2
+    private l3Key: string;      // Category L3
     private dateKey: string;    // MRN DATE
     private qtyKey: string;     // QTY RCVD
     private rateKey: string;    // NET RATE
@@ -189,6 +229,8 @@ export class ExcelGenerator {
         // Include the lowercase 'category' key the CategoryMapper writes its auto-
         // categorization results into (falls here when no category column was mapped).
         this.catKey     = resolveKey(s, [this.m.category_l1, this.m.category, 'category_l1', 'category', 'Category', 'CATEGORY', 'Category_L1'], 'category');
+        this.l2Key      = resolveKey(s, [this.m.category_l2, 'category_l2', 'Category_L2'], 'category_l2');
+        this.l3Key      = resolveKey(s, [this.m.category_l3, 'category_l3', 'Category_L3'], 'category_l3');
         this.dateKey    = resolveKey(s, [this.m.date, this.m.mrn_date, this.m.invoice_date, this.m.po_date, 'MRN DATE'], 'Date');
         this.qtyKey     = resolveKey(s, [this.m.quantity, 'QTY RCVD.', 'QTY RCVD', 'Qty'], 'Qty');
         this.rateKey    = resolveKey(s, [this.m.net_rate, this.m.unit_price, 'NET RATE', 'Net Rate'], 'Net Rate');
@@ -203,6 +245,10 @@ export class ExcelGenerator {
         this.mrnNoKey   = resolveKey(s, [this.m.mrn_number, 'MRN NO.', 'MRN NO'], 'MRN No');
         this.billNoKey  = resolveKey(s, [this.m.bill_number, 'BILL NO.', 'BILL NO'], 'Bill No');
         this.poNoKey    = resolveKey(s, [this.m.po_number, 'PO NO.', 'PO NO'], 'PO No');
+
+        // Drop repeated header rows some ERP exports leave inside the data (they would
+        // otherwise show up as a "PARTY NAME" vendor / header rows in every sheet).
+        this.data = this.data.filter(r => !looksLikeHeader(r, this.amtKey, this.supKey, this.descKey));
 
         this.wb.creator = 'Data Domino';
         this.wb.lastModifiedBy = 'Data Domino';
@@ -268,7 +314,7 @@ export class ExcelGenerator {
             const qty = parseAmount(row[this.qtyKey]);
             const uom = str(row[this.uomKey], '');
             const dept = str(row[this.deptKey], 'Unspecified');
-            const state = str(row[this.stateKey], 'Unspecified');
+            const state = stateName(row[this.stateKey]);
             const dt = parseDate(row[this.dateKey]);
             const ym = dt ? `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}` : 'Undated';
 
@@ -538,7 +584,7 @@ export class ExcelGenerator {
         for (const cat of stats.categories) {
             ws.getCell(`A${r}`).value = cat.name;
             // Live formula so the workbook ties to 06_Cleaned_Data (Category=col K, Basic Amount=col O)
-            ws.getCell(`B${r}`).value = { formula: `SUMIF('${SHEETS.cleaned}'!K2:K${lastRow},A${r},'${SHEETS.cleaned}'!O2:O${lastRow})` };
+            ws.getCell(`B${r}`).value = { formula: `SUMIF('${SHEETS.cleaned}'!K2:K${lastRow},A${r},'${SHEETS.cleaned}'!Q2:Q${lastRow})` };
             ws.getCell(`B${r}`).numFmt = '#,##0';
             ws.getCell(`C${r}`).value = { formula: `B${r}/10000000` };
             ws.getCell(`C${r}`).numFmt = '#,##0.00';
@@ -658,7 +704,11 @@ export class ExcelGenerator {
 
         const fuelCat = stats.categories.find(c => /fuel|biomass|husk/i.test(c.name));
         const tailSpend = stats.tailVendors.reduce((acc, v) => acc + v.spend, 0);
+        const singleSourceSpend = stats.singleSource.reduce((acc, it) => acc + it.spend, 0);
 
+        // Each lever's "Indicative Saving" is either a rupee number (firm, negotiable)
+        // or a short qualitative label with a [n] pointer to the NOTES block below —
+        // so there are no dangling "see note" cells.
         const rows: Array<[number | string, string, string, number | string, number | string, string, string]> = [
             [1, 'Rate harmonisation — multi-vendor',
                 `${stats.benchmark.filter(b => !/fuel|biomass|husk/i.test(b.cat)).length} items bought from 2+ vendors at differing rates (ex-fuel).`,
@@ -666,7 +716,7 @@ export class ExcelGenerator {
                 'Procurement to validate spec parity, then move volume to best in-year rate.'],
             [2, 'Fuel / biomass (timing)',
                 fuelCat ? `Fuel/biomass = ${this.fmtCr(stats.fuelSpend)} (${(stats.fuelSpend / stats.totalBasic * 100).toFixed(1)}% of spend).` : 'No fuel category detected.',
-                stats.fuelSpend, 'see note', 'Low (timing, not vendor)',
+                stats.fuelSpend, 'Timing play — note [1]', 'Low (timing, not vendor)',
                 'Forward/seasonal contracting; benchmark against index, not vendor spread.'],
             [3, 'Freight billed separately',
                 `${this.fmtCr(stats.totalFreight)} freight invoiced as a separate line.`,
@@ -674,15 +724,15 @@ export class ExcelGenerator {
                 'Negotiate delivered (FOR) pricing to absorb freight.'],
             [4, 'Tail-vendor consolidation',
                 `${stats.tailVendors.length} vendors are < Rs 2L/yr each (${this.fmtCr(tailSpend)} total).`,
-                tailSpend, 'see note', 'Process saving',
+                tailSpend, 'Process saving — note [2]', 'Process',
                 'Consolidate to preferred suppliers; cut PO/processing overhead.'],
             [5, 'Single-source leverage',
-                'High-spend items sourced from one vendor carry no rate tension.',
-                'see note', 'see note', 'Medium',
+                `${stats.singleSource.length.toLocaleString('en-IN')} items sourced from a single vendor carry no rate tension.`,
+                singleSourceSpend, 'Risk reduction — note [3]', 'Medium',
                 'Qualify a second source on top single-vendor items to create competition.'],
             [6, 'Item-master data cleanup',
                 'Generic/catch-all item codes blur attribution and block clean benchmarking.',
-                'see note', 'see note', 'Enabler',
+                '—', 'Enabler — note [4]', 'Enabler',
                 'Replace catch-all codes with specific item masters.'],
         ];
 
@@ -695,17 +745,34 @@ export class ExcelGenerator {
             xr.alignment = { vertical: 'top', wrapText: true };
             r++;
         }
-        // Quantified total (rate harmonisation lever 1 at row 4 + freight lever 3 at row 6)
+        // Quantified total = firm, negotiable levers only (rate harmonisation + freight).
         const totalRow = ws.getRow(r + 1);
-        totalRow.getCell(2).value = 'Quantified saving range (levers 1 & 3)';
+        totalRow.getCell(2).value = 'Quantified saving range (firm levers 1 & 3 only)';
         totalRow.getCell(5).value = { formula: `E4+E6` };
         totalRow.getCell(5).numFmt = '#,##0';
         totalRow.getCell(2).font = { bold: true };
         totalRow.getCell(5).font = { bold: true };
 
-        const noteRow = ws.getRow(r + 3);
-        noteRow.getCell(2).value = 'Note: fuel/biomass (lever 2) is a timing play, not a vendor-rate play — excluded from the firm range above.';
-        noteRow.getCell(2).font = { italic: true, color: { argb: SUBTLE_TEXT } };
+        // NOTES / METHOD — explains every qualitative lever referenced above.
+        r += 3;
+        ws.getCell(`B${r}`).value = 'NOTES / METHOD';
+        ws.getCell(`B${r}`).font = { bold: true, size: 12, color: { argb: HEADER_FILL } };
+        r++;
+        const notes = [
+            '[1] Fuel/biomass saving is a timing play (forward or index-linked contracting), not a vendor-rate play. It is real but not quantified here because it depends on market timing, not negotiation.',
+            '[2] Tail-vendor consolidation saves PO/processing and admin overhead, not unit price — a process saving rather than a rupee figure on spend.',
+            '[3] Single-source leverage reduces dependency risk. Savings materialise only after a second source is qualified and used to negotiate — hence "risk reduction", not a booked number.',
+            '[4] Item-master cleanup is an enabler: clean codes make future benchmarking possible. No direct saving, but it unlocks levers 1 and 5.',
+            'The "Quantified saving range" above deliberately sums only the firm, negotiable levers (rate harmonisation + freight).',
+        ];
+        for (const n of notes) {
+            const c = ws.getCell(`B${r}`);
+            c.value = n;
+            c.font = { size: 10, color: { argb: SUBTLE_TEXT } };
+            c.alignment = { wrapText: true, vertical: 'top' };
+            ws.getRow(r).height = 26;
+            r++;
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -926,8 +993,8 @@ export class ExcelGenerator {
     }
 
     // -----------------------------------------------------------------------
-    // SHEET 10 — Cleaned Data (18-column normalised grid)
-    // 03_Spend_by_Category SUMIF depends on this column order: K=Category, O=Basic Amount.
+    // SHEET 10 — Cleaned Data (20-column normalised grid)
+    // 03_Spend_by_Category SUMIF depends on this column order: K=Category L1, Q=Basic Amount.
     // -----------------------------------------------------------------------
     private createCleanedData() {
         const ws = this.wb.addWorksheet(SHEETS.cleaned);
@@ -938,15 +1005,17 @@ export class ExcelGenerator {
             { h: 'Bill No', w: 14 },
             { h: 'PO No', w: 14 },
             { h: 'Vendor', w: 30 },
-            { h: 'State', w: 10 },
+            { h: 'State', w: 18 },
             { h: 'Item Code', w: 14 },
             { h: 'Item Description', w: 40 },
             { h: 'HSN/SAC', w: 12 },          // J
-            { h: 'Category', w: 26 },          // K  ← SUMIF key
+            { h: 'Category L1', w: 24 },      // K  ← SUMIF key
+            { h: 'Category L2', w: 22 },      // L
+            { h: 'Category L3', w: 22 },      // M
             { h: 'Qty Rcvd', w: 11, numFmt: '#,##0.00' },
             { h: 'UOM', w: 8 },
             { h: 'Net Rate', w: 12, numFmt: '#,##0.00' },
-            { h: 'Basic Amount (Rs)', w: 16, numFmt: '#,##0.00' },  // O  ← SUMIF value
+            { h: 'Basic Amount (Rs)', w: 16, numFmt: '#,##0.00' },  // Q  ← SUMIF value
             { h: 'Freight (Rs)', w: 12, numFmt: '#,##0.00' },
             { h: 'Gross Amt (Rs)', w: 14, numFmt: '#,##0.00' },
             { h: 'Department', w: 16 },
@@ -965,11 +1034,13 @@ export class ExcelGenerator {
                 str(row[this.billNoKey]),
                 str(row[this.poNoKey]),
                 str(row[this.supKey]),
-                str(row[this.stateKey]),
+                stateName(row[this.stateKey]),
                 str(row[this.itemKey]),
                 str(row[this.descKey]),
                 str(row[this.hsnKey]),
                 str(row[this.catKey], 'Other / Uncategorized'),
+                str(row[this.l2Key]),
+                str(row[this.l3Key]),
                 parseAmount(row[this.qtyKey]),
                 str(row[this.uomKey]),
                 parseAmount(row[this.rateKey]),
@@ -981,6 +1052,6 @@ export class ExcelGenerator {
             r++;
         });
         ws.views = [{ state: 'frozen', ySplit: 1 }];
-        ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: 18 } };
+        ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: 20 } };
     }
 }
