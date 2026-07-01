@@ -120,6 +120,27 @@ const CategoryMapper: React.FC<CategoryMapperProps> = ({ data, mappings, onCompl
         };
     }, [localData, categoryCol, mappings]);
 
+    // Top uncategorized item descriptions by spend — drives keyword-rule writing:
+    // these are the exact descriptions a new rule should target next.
+    const uncategorizedTop = useMemo(() => {
+        const amtCol = mappings['amount'];
+        const isUncat = (c: any) => !c || String(c).trim() === '' || c === 'Uncategorized' || c === 'Other / Review';
+        const grp = new Map<string, { spend: number; count: number }>();
+        for (const row of localData) {
+            if (!isUncat(row[categoryCol])) continue;
+            const desc = String(row[descriptionCol] || 'Unknown Item').trim() || 'Unknown Item';
+            let amt = 0;
+            if (amtCol && row[amtCol]) amt = parseFloat(String(row[amtCol]).replace(/[^0-9.-]+/g, '')) || 0;
+            const g = grp.get(desc) ?? { spend: 0, count: 0 };
+            g.spend += amt; g.count += 1; grp.set(desc, g);
+        }
+        return [...grp.entries()]
+            .map(([desc, g]) => ({ desc, ...g }))
+            .sort((a, b) => b.spend - a.spend)
+            .slice(0, 20);
+    }, [localData, categoryCol, descriptionCol, mappings]);
+    const [showUncatReview, setShowUncatReview] = useState(false);
+
     // Unique uncategorized descriptions to group by (Auto-clustering for efficiency)
     const pendingItems = useMemo(() => {
         if (!categoryCol) return [];
@@ -351,6 +372,51 @@ const CategoryMapper: React.FC<CategoryMapperProps> = ({ data, mappings, onCompl
                     </button>
                 </div>
             </div>
+
+            {/* Uncategorized review — top unmapped descriptions by spend (drives keyword-rule writing) */}
+            {stats.uncategorized > 0 && uncategorizedTop.length > 0 && (
+                <div className="bg-amber-500/5 border border-amber-500/30 rounded-2xl p-4">
+                    <button
+                        onClick={() => setShowUncatReview(v => !v)}
+                        className="w-full flex items-center justify-between text-left"
+                    >
+                        <span className="text-sm font-bold text-amber-400">
+                            {stats.uncategorized} uncategorized items — top descriptions needing a keyword rule
+                        </span>
+                        <span className="text-xs text-amber-400/80">{showUncatReview ? 'Hide ▲' : 'Show ▼'}</span>
+                    </button>
+                    {showUncatReview && (
+                        <div className="mt-3">
+                            <p className="text-[11px] text-zinc-500 mb-2">
+                                These are the highest-spend items HSN + keywords couldn't classify. Add the recurring words to
+                                <span className="text-zinc-300"> src/utils/categorization/keywordRules.ts</span>, then re-run Auto-categorize.
+                            </p>
+                            <div className="max-h-72 overflow-auto rounded-lg border border-zinc-800">
+                                <table className="w-full text-xs">
+                                    <thead className="bg-zinc-900 text-zinc-500 sticky top-0">
+                                        <tr>
+                                            <th className="text-left font-bold px-3 py-2">Item Description</th>
+                                            <th className="text-right font-bold px-3 py-2">Rows</th>
+                                            <th className="text-right font-bold px-3 py-2">Spend</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {uncategorizedTop.map((u, i) => (
+                                            <tr key={i} className="border-t border-zinc-800/60">
+                                                <td className="px-3 py-1.5 text-zinc-300">{u.desc}</td>
+                                                <td className="px-3 py-1.5 text-right text-zinc-500">{u.count}</td>
+                                                <td className="px-3 py-1.5 text-right text-zinc-400">
+                                                    {new Intl.NumberFormat('en-IN', { style: 'currency', currency, maximumFractionDigits: 0 }).format(u.spend)}
+                                                </td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            )}
 
             {/* Filter & Search */}
             <div className="bg-zinc-900/50 border border-zinc-800 rounded-2xl p-4 flex justify-between items-center backdrop-blur-sm">
