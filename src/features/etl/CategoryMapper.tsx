@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { cn } from '../../lib/utils';
 import { categorize } from '../../utils/categorization/categorize';
 import { getClassifier } from '../../utils/categorization/llm';
+import { resolveSubLevels } from '../../utils/categorization/hierarchy';
 
 // Cap how many item cards render at once. With 18k rows there can be thousands of
 // distinct-description groups; rendering them all (each an animated card) freezes
@@ -72,7 +73,9 @@ const CategoryMapper: React.FC<CategoryMapperProps> = ({ data, mappings, onCompl
                 if (existing && String(existing).trim() && existing !== 'Uncategorized') return row;
                 const res = results[i];
                 by[res.source] = (by[res.source] || 0) + 1;
-                return { ...row, [categoryCol]: res.category };
+                // Derive the L2/L3 hierarchy (broad L1 -> mid L2 -> granular L3).
+                const { l2, l3 } = resolveSubLevels(res.category, String(row[hsnKey] ?? ''), String(row[descKey] ?? ''));
+                return { ...row, [categoryCol]: res.category, category_l2: l2, category_l3: l3 };
             });
             setLocalData(next);
             setAutoSummary(
