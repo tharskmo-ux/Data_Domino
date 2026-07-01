@@ -17,6 +17,7 @@
  */
 
 import ExcelJS from 'exceljs';
+import { computeSavingsModel } from './savings';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -710,103 +711,98 @@ export class ExcelGenerator {
     // -----------------------------------------------------------------------
     // SHEET 05 — Savings Opportunities (quantified + structural)
     // -----------------------------------------------------------------------
-    private createSavings(stats: ReturnType<ExcelGenerator['buildStats']>) {
+    private createSavings(_stats: ReturnType<ExcelGenerator['buildStats']>) {
         const ws = this.wb.addWorksheet(SHEETS.savings, { views: [{ showGridLines: false }] });
         const widths = [26, 50, 18, 40, 46];
         widths.forEach((w, i) => (ws.getColumn(i + 1).width = w));
 
         this.styleTitle(ws.getCell('A1'), 'Savings Opportunities');
         const intro = ws.getCell('A2');
-        intro.value = 'Where procurement spend can be reduced. Section A = firm, negotiable numbers. Section B = real opportunities that need analysis before a rupee figure can be put on them.';
+        intro.value = 'Where procurement spend can be reduced. Section A = firm, defensible numbers to negotiate now. Section B = indicative levers that need validation. Every figure shows exactly how it was calculated.';
         intro.font = { italic: true, color: { argb: SUBTLE_TEXT } };
         ws.mergeCells('A2:E2');
         intro.alignment = { wrapText: true };
 
-        const tailSpend = stats.tailVendors.reduce((acc, v) => acc + v.spend, 0);
-        const singleSourceSpend = stats.singleSource.reduce((acc, it) => acc + it.spend, 0);
-        const freightSaving = stats.totalFreight * 0.15;
-        const quantified = stats.rateHarmonisationSaving + freightSaving;
-        const fuelPct = stats.totalBasic ? (stats.fuelSpend / stats.totalBasic * 100).toFixed(1) : '0';
+        // Single source of truth — same model the dashboard "Savings Roadmap" renders.
+        const model = computeSavingsModel(this.data, this.m);
+        const firmLevers = model.levers.filter(l => l.tier === 'firm');
+        const indicativeLevers = model.levers.filter(l => l.tier === 'indicative' && l.saving > 0);
 
         // Headline number
         let r = 4;
         const head = ws.getCell(`A${r}`);
-        head.value = `Estimated quantified saving: ${this.fmtCr(quantified)}  —  from the firm levers in Section A`;
+        head.value = `Firm, defensible saving: ${this.fmtCr(model.firmSaving)}  —  from Section A. Indicative upside (Section B): ${this.fmtCr(model.indicativeSaving)}, subject to validation.`;
         head.font = { bold: true, size: 14, color: { argb: TITLE_TEXT } };
         ws.mergeCells(`A${r}:E${r}`);
         r += 2;
 
-        // ---- SECTION A — quantified, negotiable now ----
-        ws.getCell(`A${r}`).value = 'A.  QUANTIFIED SAVINGS  —  negotiable now';
+        // ---- SECTION A — firm, negotiable now ----
+        ws.getCell(`A${r}`).value = 'A.  FIRM SAVINGS  —  defensible, negotiable now';
         ws.getCell(`A${r}`).font = { bold: true, size: 12, color: { argb: HEADER_FILL } };
         r++;
         let hdr = ws.getRow(r);
-        hdr.values = ['Opportunity', 'What we found', 'Spend involved (Rs)', 'Est. saving (Rs)', 'What to do'];
+        hdr.values = ['Opportunity', 'How this number is calculated', 'Spend involved (Rs)', 'Est. saving (Rs)', 'What to do'];
         this.styleHeaderRow(hdr); r++;
-        const quantRows: Array<[string, string, number, number, string]> = [
-            ['Rate harmonisation',
-                `${stats.benchmark.filter(b => !/fuel|biomass|husk/i.test(b.cat)).length} items are bought from 2 or more vendors at different rates. Moving volume to the cheapest rate captures the gap.`,
-                stats.rateHarmonisationSpend, stats.rateHarmonisationSaving,
-                'Confirm the items are the same spec, then shift volume to the lowest in-year vendor rate.'],
-            ['Freight billed separately',
-                `${this.fmtCr(stats.totalFreight)} of freight is invoiced as a separate line. Delivered pricing typically absorbs ~15%.`,
-                stats.totalFreight, freightSaving,
-                'Ask key vendors for delivered (FOR) prices so freight is built into the unit rate.'],
-        ];
         const firstQ = r;
-        for (const row of quantRows) {
+        for (const lever of firmLevers) {
             const xr = ws.getRow(r);
-            xr.values = row as unknown as ExcelJS.CellValue[];
+            xr.values = [
+                lever.label, lever.how, lever.basisSpend, lever.saving,
+                lever.key === 'freight'
+                    ? 'Ask key vendors for delivered (FOR) prices so freight is built into the unit rate.'
+                    : 'Confirm items are the same spec, then shift volume to the lowest in-year vendor rate.',
+            ] as unknown as ExcelJS.CellValue[];
             xr.getCell(3).numFmt = '#,##0'; xr.getCell(4).numFmt = '#,##0';
             xr.alignment = { vertical: 'top', wrapText: true };
-            ws.getRow(r).height = 44;
+            ws.getRow(r).height = 46;
             r++;
         }
         const tot = ws.getRow(r);
-        tot.getCell(1).value = 'TOTAL — Section A';
-        tot.getCell(4).value = { formula: `D${firstQ}+D${firstQ + 1}` };
+        tot.getCell(1).value = 'TOTAL — Section A (firm)';
+        tot.getCell(4).value = { formula: `SUM(D${firstQ}:D${r - 1})` };
         tot.getCell(4).numFmt = '#,##0';
         tot.getCell(1).font = { bold: true }; tot.getCell(4).font = { bold: true };
         [1, 3, 4].forEach((c) => { tot.getCell(c).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: TOTAL_FILL } }; });
         r += 3;
 
-        // ---- SECTION B — opportunities that need analysis ----
-        ws.getCell(`A${r}`).value = 'B.  ADDITIONAL OPPORTUNITIES  —  need analysis to put a number on';
+        // ---- SECTION B — indicative levers (quantified, need validation) ----
+        ws.getCell(`A${r}`).value = 'B.  INDICATIVE LEVERS  —  need validation before commitment';
         ws.getCell(`A${r}`).font = { bold: true, size: 12, color: { argb: HEADER_FILL } };
         r++;
         hdr = ws.getRow(r);
-        hdr.values = ['Opportunity', 'What we found', 'Spend involved (Rs)', 'Why not a firm number yet', 'What to do'];
+        hdr.values = ['Opportunity', 'How this number is calculated', 'Spend involved (Rs)', 'Indicative saving (Rs)', 'What to do'];
         this.styleHeaderRow(hdr); r++;
-        const qualRows: Array<[string, string, number | string, string, string]> = [
-            ['Fuel / biomass timing',
-                `Fuel & biomass is ${this.fmtCr(stats.fuelSpend)} (${fuelPct}% of spend).`,
-                stats.fuelSpend,
-                'The saving comes from buying at the right time (forward / index-linked contracts), not from switching vendors — so it depends on market timing.',
-                'Contract forward or against a price index; benchmark against the index, not against other vendors.'],
-            ['Tail-vendor consolidation',
-                `${stats.tailVendors.length} vendors are under Rs 2L/yr each (${this.fmtCr(tailSpend)} total).`,
-                tailSpend,
-                'The saving is in cutting PO and admin overhead, not in unit price — a process / efficiency saving.',
-                'Consolidate these onto a few preferred suppliers to reduce processing cost.'],
-            ['Single-source leverage',
-                `${stats.singleSource.length.toLocaleString('en-IN')} items come from only one vendor (${this.fmtCr(singleSourceSpend)}).`,
-                singleSourceSpend,
-                'With no competing quote there is no rate tension. A saving only appears after a 2nd source is qualified and used to negotiate.',
-                'Qualify a second source on the highest-spend single-vendor items.'],
-            ['Item-master cleanup',
-                'Generic / catch-all item codes blur what was actually bought.',
-                '—',
-                'This is an enabler, not a direct saving — clean codes make the levers above measurable.',
-                'Replace catch-all codes with specific item descriptions.'],
-        ];
-        for (const row of qualRows) {
+        const firstB = r;
+        const actionByKey: Record<string, string> = {
+            alternateVendor: 'Qualify a second source on the highest-spend single-vendor items, then RFQ.',
+            volumeCommitment: 'Consolidate fragmented POs and negotiate an annual volume commitment.',
+            tailConsolidation: 'Consolidate small suppliers onto a few preferred vendors / P-cards.',
+            paymentTerms: 'Renegotiate cash/advance/short-net terms towards net-30+.',
+        };
+        for (const lever of indicativeLevers) {
             const xr = ws.getRow(r);
-            xr.values = row as unknown as ExcelJS.CellValue[];
-            if (typeof row[2] === 'number') xr.getCell(3).numFmt = '#,##0';
+            xr.values = [
+                lever.label, lever.how, lever.basisSpend, lever.saving, actionByKey[lever.key] ?? '',
+            ] as unknown as ExcelJS.CellValue[];
+            xr.getCell(3).numFmt = '#,##0'; xr.getCell(4).numFmt = '#,##0';
             xr.alignment = { vertical: 'top', wrapText: true };
-            ws.getRow(r).height = 50;
+            ws.getRow(r).height = 52;
             r++;
         }
+        if (indicativeLevers.length) {
+            const tb = ws.getRow(r);
+            tb.getCell(1).value = 'TOTAL — Section B (indicative)';
+            tb.getCell(4).value = { formula: `SUM(D${firstB}:D${r - 1})` };
+            tb.getCell(4).numFmt = '#,##0';
+            tb.getCell(1).font = { bold: true }; tb.getCell(4).font = { bold: true };
+            [1, 3, 4].forEach((c) => { tb.getCell(c).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: TOTAL_FILL } }; });
+            r++;
+        }
+        const note = ws.getCell(`A${r + 1}`);
+        note.value = 'Note: Section B levers are indicative upper bounds on distinct pools of spend (each rupee counted once). Firm the rates through RFQs / negotiations before committing.';
+        note.font = { italic: true, color: { argb: SUBTLE_TEXT } };
+        ws.mergeCells(`A${r + 1}:E${r + 1}`);
+        (ws.getCell(`A${r + 1}`)).alignment = { wrapText: true };
     }
 
     // -----------------------------------------------------------------------

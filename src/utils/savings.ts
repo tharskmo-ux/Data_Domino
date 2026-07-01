@@ -18,6 +18,25 @@ export interface SavingsColumns {
     categoryKey: string;
     descKey?: string;
     freightKey?: string;
+    ptKey?: string;
+}
+
+/** One savings lever — the number AND a plain-English explanation of how it was derived. */
+export interface SavingsLever {
+    key: string;
+    label: string;
+    tier: 'firm' | 'indicative';
+    basisSpend: number;   // the spend the rate is applied to
+    ratePct: number;      // e.g. 3 for 3% (0 for the computed rate-harmonisation gap)
+    saving: number;
+    how: string;          // plain-English, includes the arithmetic — shown identically in app + Excel
+}
+
+export interface SavingsModel {
+    totalSpend: number;
+    firmSaving: number;        // rate harmonisation + freight (defensible headline)
+    indicativeSaving: number;  // sum of the indicative levers (mutually exclusive bases)
+    levers: SavingsLever[];    // firm levers first, then indicative
 }
 
 export interface ConservativeSavings {
@@ -59,7 +78,103 @@ export function resolveSavingsColumns(sample: Record<string, any> | undefined, m
         categoryKey: resolveKey(sample, [m.category_l1, m.category, 'category_l1', 'category', 'Category', 'CATEGORY'], 'category'),
         descKey: resolveKey(sample, [m.item_description, 'ITEM DESC.', 'ITEM DESC', 'Item Description'], 'Item Description'),
         freightKey: resolveKey(sample, [m.freight, 'FREIGHT', 'Freight'], 'Freight'),
+        ptKey: resolveKey(sample, [m.payment_terms, m.terms, 'PAYMENT TERMS', 'Payment Terms', 'Terms'], ''),
     };
+}
+
+/** Compact Indian-format money for the plain-English explanations. */
+export function inrShort(n: number): string {
+    if (n >= 1e7) return `₹${(n / 1e7).toFixed(2)} Cr`;
+    if (n >= 1e5) return `₹${(n / 1e5).toFixed(1)} L`;
+    return `₹${Math.round(n).toLocaleString('en-IN')}`;
+}
+
+/**
+ * The FULL savings model — every lever with its number and a plain-English "how".
+ * One source of truth for both the dashboard roadmap and the Excel savings sheet, so
+ * they are always consistent and each figure explains itself.
+ *
+ * Firm levers (defensible now): rate harmonisation + freight.
+ * Indicative levers (need validation) use mutually-exclusive row bases (each rupee counted
+ * once, by priority) so the indicative total never double-counts:
+ *   single-source item (5%) > frequent large supplier (3%) > tail supplier (6%) > risky terms (2%).
+ */
+export function computeSavingsModel(
+    rows: Array<Record<string, any>>,
+    mappings: Record<string, any> = {},
+    freightRate = 0.15,
+): SavingsModel {
+    const cols = resolveSavingsColumns(rows[0], mappings);
+    const cons = computeConservativeSavings(rows, cols, freightRate);
+
+    // Pass 1 — item → supplier set, and supplier → {spend, orders}
+    const itemSuppliers = new Map<string, Set<string>>();
+    const supAgg = new Map<string, { spend: number; orders: number }>();
+    let totalSpend = 0;
+    for (const r of rows) {
+        const amt = num(r[cols.amountKey]);
+        totalSpend += amt;
+        const it = txt(r[cols.itemKey], 'Unknown');
+        const sup = txt(r[cols.vendorKey], 'Unknown');
+        if (!itemSuppliers.has(it)) itemSuppliers.set(it, new Set());
+        itemSuppliers.get(it)!.add(sup);
+        const s = supAgg.get(sup) || { spend: 0, orders: 0 };
+        s.spend += amt; s.orders += 1; supAgg.set(sup, s);
+    }
+    const singleSupplierItems = new Set([...itemSuppliers].filter(([, s]) => s.size === 1).map(([i]) => i));
+    const frequentSuppliers = new Set([...supAgg].filter(([, s]) => s.spend >= 1_000_000 && s.orders >= 12).map(([n]) => n));
+    const tailSuppliers = new Set([...supAgg].filter(([, s]) => s.spend > 0 && s.spend < 200_000).map(([n]) => n));
+
+    const PT_RISKY = /\b(cash|advance|prepay|upfront|immediate|cod|on.?delivery)\b|\bnet\s*0?7\b|\bnet\s*1[04]\b/i;
+
+    // Pass 2 — assign each row to ONE indicative lever by priority (no double-count)
+    let altSpend = 0, volSpend = 0, tailSpend = 0, ptSpend = 0;
+    for (const r of rows) {
+        const amt = num(r[cols.amountKey]);
+        if (amt <= 0) continue;
+        const it = txt(r[cols.itemKey], 'Unknown');
+        const sup = txt(r[cols.vendorKey], 'Unknown');
+        if (singleSupplierItems.has(it)) altSpend += amt;
+        else if (frequentSuppliers.has(sup)) volSpend += amt;
+        else if (tailSuppliers.has(sup)) tailSpend += amt;
+        else if (cols.ptKey && PT_RISKY.test(String(r[cols.ptKey] ?? ''))) ptSpend += amt;
+    }
+
+    const levers: SavingsLever[] = [
+        {
+            key: 'rateHarmonisation', label: 'Rate harmonisation', tier: 'firm',
+            basisSpend: cons.rateHarmonisationSpend, ratePct: 0, saving: cons.rateHarmonisationSaving,
+            how: `On ${inrShort(cons.rateHarmonisationSpend)} of items bought from 2+ vendors in the same unit (fuel & agri excluded), move volume to each item's lowest in-year rate: Σ (price paid − best rate) × qty = ${inrShort(cons.rateHarmonisationSaving)}.`,
+        },
+        {
+            key: 'freight', label: 'Freight billed separately', tier: 'firm',
+            basisSpend: cons.totalFreight, ratePct: Math.round(freightRate * 100), saving: cons.freightSaving,
+            how: `${inrShort(cons.totalFreight)} of freight is invoiced on separate lines; delivered (FOR) pricing absorbs about ${Math.round(freightRate * 100)}% → ${inrShort(cons.freightSaving)}.`,
+        },
+        {
+            key: 'alternateVendor', label: 'Alternate vendor (RFQ)', tier: 'indicative',
+            basisSpend: altSpend, ratePct: 5, saving: altSpend * 0.05,
+            how: `5% competitive-tension benefit on ${inrShort(altSpend)} of spend on items that currently have only one supplier (qualify a 2nd source) = ${inrShort(altSpend * 0.05)}.`,
+        },
+        {
+            key: 'volumeCommitment', label: 'Volume commitment', tier: 'indicative',
+            basisSpend: volSpend, ratePct: 3, saving: volSpend * 0.03,
+            how: `3% volume-commitment discount on ${inrShort(volSpend)} placed with suppliers you order from often and at scale (≥ ₹10 L and ≥ 12 orders) = ${inrShort(volSpend * 0.03)}.`,
+        },
+        {
+            key: 'tailConsolidation', label: 'Tail consolidation', tier: 'indicative',
+            basisSpend: tailSpend, ratePct: 6, saving: tailSpend * 0.06,
+            how: `6% process + leverage saving on ${inrShort(tailSpend)} spread across many small suppliers (< ₹2 L/yr each) by consolidating onto preferred vendors = ${inrShort(tailSpend * 0.06)}.`,
+        },
+        {
+            key: 'paymentTerms', label: 'Payment terms', tier: 'indicative',
+            basisSpend: ptSpend, ratePct: 2, saving: ptSpend * 0.02,
+            how: `~2% cost-of-capital saving on ${inrShort(ptSpend)} paid on cash / advance / short-net terms by moving to net-30+ = ${inrShort(ptSpend * 0.02)}.`,
+        },
+    ];
+    const firmSaving = cons.firmSaving;
+    const indicativeSaving = levers.filter(l => l.tier === 'indicative').reduce((a, l) => a + l.saving, 0);
+    return { totalSpend, firmSaving, indicativeSaving, levers };
 }
 
 export function computeConservativeSavings(

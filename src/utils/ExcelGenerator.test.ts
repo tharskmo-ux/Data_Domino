@@ -75,12 +75,12 @@ describe('ExcelGenerator — 11-sheet report', () => {
     expect(t).toContain('HHI');
   });
 
-  it('Savings sheet is two clear sections with no dangling "see note"', async () => {
+  it('Savings sheet is two clear sections (firm vs indicative) that explain each number', async () => {
     const wb = await loadWorkbook();
     const t = sheetText(wb.getWorksheet('09_Savings_Opportunities')!);
-    expect(t).toContain('QUANTIFIED SAVINGS');
-    expect(t).toContain('ADDITIONAL OPPORTUNITIES');
-    expect(t).toContain('Why not a firm number yet');
+    expect(t).toContain('FIRM SAVINGS');
+    expect(t).toContain('INDICATIVE LEVERS');
+    expect(t).toContain('How this number is calculated');
     expect(t).not.toMatch(/see note/i);
   });
 

@@ -45,7 +45,7 @@ import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
 import { db, storage } from '../../lib/firebase';
 import { getAutoMappings } from '../../utils/columnDetection';
-import { computeConservativeSavingsFromMappings } from '../../utils/savings';
+import { computeConservativeSavingsFromMappings, computeSavingsModel } from '../../utils/savings';
 import { getAIInsights } from '../../services/aiService';
 import type { AIResponse } from '../../services/aiService';
 
@@ -685,11 +685,13 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
             ? totalSpend * 0.12 // Force realistic 12% if saved data is suspiciously equal-to-spend
             : restoredRaw;
 
-        // Conservative, defensible savings — the SAME shared calc the Excel report uses,
-        // so the headline number matches the report. The 5-lever totalIdentifiedSavings is
-        // kept only as an INDICATIVE (softer, requires-validation) figure.
+        // Conservative, defensible savings + the full lever model — the SAME shared calc the
+        // Excel report renders, so the dashboard roadmap and the report are always consistent
+        // and every figure explains itself.
         const conservative = computeConservativeSavingsFromMappings(filteredRows, mappings);
-        const indicativeSavings = Math.min(totalIdentifiedSavings, totalSpend);
+        const savingsModel = computeSavingsModel(filteredRows, mappings);
+        const _leverByKey = Object.fromEntries(savingsModel.levers.map(l => [l.key, l]));
+        const indicativeSavings = savingsModel.indicativeSaving;
 
         let identifiedSavings = !isSyntheticFallback
             ? conservative.firmSaving
@@ -841,83 +843,22 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
             tailSpend: savingsBreakdown.tailSpend * leverProbabilities.tailSpend / 100,
         };
 
-        // --- SAVINGS OPPORTUNITIES RANKED BY RISK-ADJUSTED VALUE ---
-        // Each opportunity carries gross savings, probability, and expected (risk-adjusted) value.
-        const leverMeta: Record<string, { label: string; color: string; recommendation: string; calcFn: (d: typeof opportunityDetails[string]) => string }> = {
-            priceArbitrage: {
-                label: 'Rate Harmonisation & Freight',
-                color: 'emerald',
-                recommendation: 'Move multi-vendor, single-UOM items to the best qualified vendor rate (fuel & agri excluded), and tier freight against benchmarked lanes. Firm, report-backed number.',
-                calcFn: () => `Σ (weighted price paid − best vendor rate) × qty on comparable multi-vendor items (ex-fuel) + conservative freight tiering`,
-            },
-            paymentTerms: {
-                label: 'Payment Terms Optimisation',
-                color: 'primary',
-                recommendation: 'Renegotiate cash/advance/net-7 terms to net-30+. Early-pay discounts and reduced cost-of-capital unlock 1.5–2.5% of affected spend.',
-                calcFn: (d) => `1.5–2.5% rate on ${formatCurrency(d.spend)} of spend with unfavourable payment terms (cash/advance/net ≤ 14)`,
-            },
-            volumeDiscount: {
-                label: 'Volume Commitment Discount',
-                color: 'teal',
-                recommendation: 'Consolidate fragmented purchase orders to these key suppliers and negotiate annual volume commitments for a conservative 3% discount.',
-                calcFn: (d) => `3% volume commitment discount on ${formatCurrency(d.spend)} across suppliers with high-frequency fragmented orders`,
-            },
-            singleSource: {
-                label: 'Alternate Vendor Introduction',
-                color: 'amber',
-                recommendation: 'Qualify at least one alternate supplier for sole-sourced items. Competitive tension from an RFQ typically yields 5% in year-1.',
-                calcFn: (d) => `5% benchmark saving from alternate-vendor RFQ on ${formatCurrency(d.spend)} sole-source spend (conservative year-1 estimate)`,
-            },
-            tailSpend: {
-                label: 'Tail Spend Consolidation',
-                color: 'zinc',
-                recommendation: 'Consolidate long-tail suppliers into preferred-vendor programs or purchasing cards to reduce transaction costs and gain volume leverage.',
-                calcFn: (d) => `6% consolidation saving on ${formatCurrency(d.spend)} long-tail spend (bottom-20%-of-spend suppliers)`,
-            },
-        };
-
-        // Align the price-arbitrage lever to the FIRM, defensible number (same as the report
-        // headline): override its saving with the conservative firm figure and strip fuel/agri
-        // from its displayed categories (the firm method excludes them).
-        const _fuelCat = /fuel|biomass|husk|petroleum|lpg|agri/i;
-        if (opportunityDetails.priceArbitrage) {
-            opportunityDetails.priceArbitrage.savings = conservative.firmSaving;
-            opportunityDetails.priceArbitrage.categories = new Set(
-                Array.from(opportunityDetails.priceArbitrage.categories).filter(c => !_fuelCat.test(String(c)))
-            );
-        }
-
-        const opportunityRanking = Object.entries(opportunityDetails)
-            .filter(([_, d]) => d.savings > 0)
-            .map(([key, d]) => {
-                const meta = leverMeta[key] ?? { label: key, color: 'zinc', recommendation: '', calcFn: () => '' };
-                const isFirm = key === 'priceArbitrage';
-                const prob = isFirm ? 95 : (leverProbabilities[key as keyof typeof leverProbabilities] ?? 50);
-                const expectedSavings = d.savings * prob / 100;
-                return {
-                    id: key,
-                    tier: isFirm ? 'firm' : 'indicative',
-                    label: meta.label,
-                    value: d.savings,             // gross savings
-                    expectedValue: expectedSavings, // risk-adjusted
-                    probability: prob,
-                    currentSpend: d.spend,
-                    percent: d.spend > 0 ? (d.savings / d.spend) * 100 : 0,
-                    categories: Array.from(d.categories).slice(0, 3),
-                    topVendors: Object.entries(d.vendors)
-                        .sort((a, b) => b[1] - a[1])
-                        .slice(0, 3)
-                        .map(([name, spend]) => ({ name, spend })),
-                    projectedSpend: d.spend - d.savings,
-                    itemCount: d.itemCount,
-                    color: meta.color,
-                    recommendation: meta.recommendation,
-                    calculation: meta.calcFn(d),
-                };
-            })
-            // Firm (defensible) opportunity first, then indicative levers by expected value.
-            .sort((a, b) => (a.tier === b.tier ? b.expectedValue - a.expectedValue : a.tier === 'firm' ? -1 : 1))
-            .slice(0, 5);
+        // --- SAVINGS OPPORTUNITIES — from the single shared model (same as the Excel report) ---
+        // Firm levers first (rate harmonisation + freight), then indicative levers. Each carries
+        // its own plain-English "how", so the figure explains itself and matches the report exactly.
+        const opportunityRanking = savingsModel.levers
+            .filter(l => l.saving > 0)
+            .map(l => ({
+                id: l.key,
+                tier: l.tier,
+                label: l.label,
+                value: l.saving,
+                basisSpend: l.basisSpend,
+                ratePct: l.ratePct,
+                how: l.how,
+            }))
+            // Firm first, then indicative — each tier by saving, largest first.
+            .sort((a, b) => (a.tier === b.tier ? b.value - a.value : a.tier === 'firm' ? -1 : 1));
 
         // ── DATA-DRIVEN SAVINGS LEVERS ────────────────────────────────────────────
         // FIX 7+8+9: Probabilities are fully derived from actual dataset signals.
@@ -1357,12 +1298,9 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
             identifiedSavings,
             indicativeSavings,
             isSyntheticFallback,
-            quickWinSavings: (effectiveBreakdown.priceArbitrage ?? (effectiveBreakdown as any).priceVariance ?? 0)
-                + (effectiveBreakdown.paymentTerms ?? 0),
-            strategicSavings: (effectiveBreakdown.volumeDiscount ?? 0)
-                + (effectiveBreakdown.singleSource ?? 0)
-                + (effectiveBreakdown.tailSpend ?? 0)
-                + ((effectiveBreakdown as any).compliance ?? 0),
+            // From the shared model so these reconcile with the roadmap cards + report.
+            quickWinSavings: (_leverByKey['alternateVendor']?.saving ?? 0) + (_leverByKey['paymentTerms']?.saving ?? 0),
+            strategicSavings: (_leverByKey['volumeCommitment']?.saving ?? 0) + (_leverByKey['tailConsolidation']?.saving ?? 0),
             savingsLevers,
             leverProbabilities,
             riskAdjustedSavings,
@@ -2334,7 +2272,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                     )}>
                                         <span className="text-[10px] font-black text-emerald-500 uppercase tracking-widest mb-4 block">Quick-Win Savings</span>
                                         <div className="text-4xl font-black text-white mb-2">{formatCurrency(dynamicStats.quickWinSavings)}</div>
-                                        <p className="text-xs text-zinc-500">Price arbitrage &amp; payment terms (indicative — needs validation)</p>
+                                        <p className="text-xs text-zinc-500">Alternate vendor (RFQ) &amp; payment terms — indicative</p>
                                     </div>
                                     <div className={cn(
                                         "bg-amber-500/5 border border-amber-500/20 rounded-3xl p-8 border-b-4 border-b-amber-500 transition-all",
@@ -2342,7 +2280,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                     )}>
                                         <span className="text-[10px] font-black text-amber-500 uppercase tracking-widest mb-4 block">Strategic Pipeline</span>
                                         <div className="text-4xl font-black text-white mb-2">{formatCurrency(dynamicStats.strategicSavings)}</div>
-                                        <p className="text-xs text-zinc-500">Volume commitment, alternate vendors &amp; tail consolidation</p>
+                                        <p className="text-xs text-zinc-500">Volume commitment &amp; tail consolidation — indicative</p>
                                     </div>
                                 </div>
 
@@ -2357,86 +2295,37 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                             <div
                                                 key={opp.id}
                                                 className={cn(
-                                                    "bg-zinc-900/40 border border-zinc-800 rounded-[2rem] p-6 transition-all relative overflow-hidden group/opp",
+                                                    "bg-zinc-900/40 border border-zinc-800 rounded-[2rem] p-6 transition-all",
                                                     !isAdmin && !isAdminMirror && "blur-md pointer-events-none select-none opacity-40"
                                                 )}
                                             >
-                                                <div className="flex items-center justify-between mb-4">
-                                                    <div className="flex items-center gap-4">
-                                                        <div className="w-10 h-10 rounded-xl bg-zinc-950 border border-zinc-800 flex items-center justify-center text-xs font-black text-zinc-500">
+                                                <div className="flex items-start justify-between gap-4">
+                                                    <div className="flex items-start gap-4">
+                                                        <div className="w-10 h-10 rounded-xl bg-zinc-950 border border-zinc-800 flex items-center justify-center text-xs font-black text-zinc-500 shrink-0">
                                                             0{idx + 1}
                                                         </div>
                                                         <div>
-                                                            <h5 className="text-white font-bold">{opp.label}</h5>
-                                                            <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest max-w-sm">{opp.recommendation}</p>
-                                                        </div>
-                                                    </div>
-                                                    <div className="text-right shrink-0 ml-4">
-                                                        <div className="text-xl font-black text-primary">{formatCurrency(opp.value)}</div>
-                                                        <div className="text-[10px] font-bold text-zinc-400">{opp.percent.toFixed(1)}% of addressable spend</div>
-                                                        <div className="mt-1 flex items-center justify-end gap-2">
-                                                            {opp.tier === 'firm' ? (
-                                                                <span className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-widest">
-                                                                    Firm • matches report
+                                                            <div className="flex items-center gap-2 flex-wrap">
+                                                                <h5 className="text-white font-bold">{opp.label}</h5>
+                                                                <span className={cn(
+                                                                    "text-[9px] font-black px-2 py-0.5 rounded-full border uppercase tracking-widest",
+                                                                    opp.tier === 'firm'
+                                                                        ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
+                                                                        : "bg-amber-500/10 text-amber-400 border-amber-500/20"
+                                                                )}>
+                                                                    {opp.tier === 'firm' ? 'Firm · matches report' : 'Indicative · needs validation'}
                                                                 </span>
-                                                            ) : (
-                                                                <>
-                                                                    <span className="bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-widest">
-                                                                        Indicative
-                                                                    </span>
-                                                                    <span className="text-[10px] font-bold text-zinc-500">
-                                                                        Risk-adj: {formatCurrency(opp.expectedValue)}
-                                                                    </span>
-                                                                </>
-                                                            )}
+                                                            </div>
+                                                            {/* Plain-English "how" — identical to the Excel report */}
+                                                            <p className="text-xs text-zinc-400 mt-2 max-w-2xl leading-relaxed">{opp.how}</p>
                                                         </div>
                                                     </div>
-                                                </div>
-
-                                                {/* Expanded Details - Always unlocked for admin */}
-                                                <div className="mt-6 pt-6 border-t border-zinc-800/50 space-y-6">
-                                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                                                        <div>
-                                                            <h6 className="text-[10px] font-black text-zinc-500 uppercase tracking-widest mb-3">Top Impact Categories</h6>
-                                                            <div className="flex flex-wrap gap-2">
-                                                                {opp.categories.map((c: string) => (
-                                                                    <span key={c} className="bg-zinc-950 border border-zinc-800 text-zinc-400 px-3 py-1 rounded-full text-[10px] font-bold">
-                                                                        {c}
-                                                                    </span>
-                                                                ))}
-                                                            </div>
-
-                                                            <div className="mt-6">
-                                                                <h6 className="text-[10px] font-black text-zinc-500 uppercase tracking-widest mb-3">Calculation Logic</h6>
-                                                                <div className="bg-zinc-950/50 border border-zinc-800/50 p-3 rounded-xl text-[10px] font-mono text-zinc-400">
-                                                                    {opp.calculation}
-                                                                </div>
-                                                            </div>
-                                                        </div>
-
-                                                        <div>
-                                                            <h6 className="text-[10px] font-black text-zinc-500 uppercase tracking-widest mb-3">Current Vendor Concentration</h6>
-                                                            <div className="space-y-3">
-                                                                {opp.topVendors.map((v: any) => (
-                                                                    <div key={v.name} className="flex justify-between items-center text-[10px]">
-                                                                        <span className="text-zinc-400 font-bold max-w-[150px] truncate">{v.name}</span>
-                                                                        <span className="text-zinc-500">{formatCurrency(v.spend)}</span>
-                                                                    </div>
-                                                                ))}
-                                                            </div>
-
-                                                            <div className="mt-6 p-4 bg-primary/5 border border-primary/20 rounded-2xl">
-                                                                <div className="flex justify-between items-end">
-                                                                    <div>
-                                                                        <span className="text-[9px] font-black text-primary uppercase block mb-1">Projected Outcome</span>
-                                                                        <div className="text-white font-black">{formatCurrency(opp.projectedSpend)}</div>
-                                                                    </div>
-                                                                    <div className="text-right">
-                                                                        <span className="text-[9px] font-black text-emerald-500 uppercase block mb-1">Target Saving</span>
-                                                                        <div className="text-emerald-500 font-black">-{formatCurrency(opp.value)}</div>
-                                                                    </div>
-                                                                </div>
-                                                            </div>
+                                                    <div className="text-right shrink-0">
+                                                        <div className="text-xl font-black text-white">{formatCurrency(opp.value)}</div>
+                                                        <div className="text-[10px] font-bold text-zinc-500 mt-1">
+                                                            {opp.ratePct > 0
+                                                                ? `${opp.ratePct}% of ${formatCurrency(opp.basisSpend)}`
+                                                                : `on ${formatCurrency(opp.basisSpend)} multi-vendor spend`}
                                                         </div>
                                                     </div>
                                                 </div>

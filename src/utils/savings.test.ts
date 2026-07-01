@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import ExcelJS from 'exceljs';
-import { computeConservativeSavings, computeConservativeSavingsFromMappings, type SavingsColumns } from './savings';
+import { computeConservativeSavings, computeConservativeSavingsFromMappings, computeSavingsModel, type SavingsColumns } from './savings';
 import { ExcelGenerator } from './ExcelGenerator';
 
 const COLS: SavingsColumns = {
@@ -38,5 +38,39 @@ describe('computeConservativeSavings', () => {
         let text = '';
         wb.getWorksheet('09_Savings_Opportunities')!.eachRow((row) => row.eachCell((c) => { text += ' ' + String(c.value ?? ''); }));
         expect(text).toContain(`${(util.firmSaving / 1e7).toFixed(2)} Rs Cr`);
+    });
+});
+
+describe('computeSavingsModel (shared by dashboard + Excel)', () => {
+    const rows = dataset.map((r) => ({
+        'ITEM CODE': r.item, 'PARTY NAME': r.vendor, 'UOM': r.uom, 'QTY RCVD.': r.qty,
+        'BASIC AMOUNT': r.amount, category: r.cat, 'ITEM DESC.': r.desc, 'FREIGHT': r.freight,
+    }));
+
+    it('produces firm + indicative levers, each with a plain-English "how"', () => {
+        const m = computeSavingsModel(rows, {});
+        const byKey = Object.fromEntries(m.levers.map((l) => [l.key, l]));
+        expect(Math.round(m.firmSaving)).toBe(1300);              // rate harmonisation 1000 + freight 300
+        expect(Math.round(byKey.rateHarmonisation.saving)).toBe(1000);
+        expect(Math.round(byKey.freight.saving)).toBe(300);
+        expect(Math.round(byKey.alternateVendor.saving)).toBe(500);   // IT4 single-source: 5% of 10,000
+        // every lever explains itself
+        m.levers.forEach((l) => expect(l.how.length).toBeGreaterThan(15));
+        // firm levers are listed before indicative
+        const firstIndicative = m.levers.findIndex((l) => l.tier === 'indicative');
+        const lastFirm = m.levers.map((l) => l.tier).lastIndexOf('firm');
+        expect(lastFirm).toBeLessThan(firstIndicative);
+    });
+
+    it('the Excel report shows the SAME indicative lever numbers (dashboard == report)', async () => {
+        const m = computeSavingsModel(rows, {});
+        const blob = await new ExcelGenerator(rows, {}, 'INR').generate();
+        const wb = new ExcelJS.Workbook();
+        await wb.xlsx.load(await blob.arrayBuffer());
+        let text = '';
+        wb.getWorksheet('09_Savings_Opportunities')!.eachRow((row) => row.eachCell((c) => { text += ' ' + String(c.value ?? ''); }));
+        for (const lever of m.levers.filter((l) => l.saving > 0)) {
+            expect(text).toContain(String(Math.round(lever.basisSpend)));  // basis spend cell present
+        }
     });
 });
