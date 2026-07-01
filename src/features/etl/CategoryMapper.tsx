@@ -5,6 +5,12 @@ import { cn } from '../../lib/utils';
 import { categorize } from '../../utils/categorization/categorize';
 import { getClassifier } from '../../utils/categorization/llm';
 
+// Cap how many item cards render at once. With 18k rows there can be thousands of
+// distinct-description groups; rendering them all (each an animated card) freezes
+// the browser. The full dataset is untouched — Auto-categorize and search operate
+// on everything; this only limits what's painted at once.
+const RENDER_CAP = 60;
+
 interface CategoryMapperProps {
     data: any[];
     mappings: Record<string, string>;
@@ -390,7 +396,7 @@ const CategoryMapper: React.FC<CategoryMapperProps> = ({ data, mappings, onCompl
             {/* Classification Grid */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                 <AnimatePresence>
-                    {pendingItems.map((group, idx) => (
+                    {pendingItems.slice(0, RENDER_CAP).map((group, idx) => (
                         <motion.div
                             key={group.desc + idx}
                             initial={{ opacity: 0, scale: 0.95 }}
@@ -454,6 +460,13 @@ const CategoryMapper: React.FC<CategoryMapperProps> = ({ data, mappings, onCompl
                         </motion.div>
                     ))}
                 </AnimatePresence>
+
+                {pendingItems.length > RENDER_CAP && (
+                    <div className="col-span-full py-4 text-center text-zinc-500 text-sm">
+                        Showing first {RENDER_CAP} of {pendingItems.length.toLocaleString()} item groups.
+                        Use <span className="text-zinc-300">Auto-categorize</span> to clear the bulk, or <span className="text-zinc-300">search</span> to find specific items.
+                    </div>
+                )}
 
                 {pendingItems.length === 0 && (
                     <div className="col-span-full py-20 text-center text-zinc-500">
