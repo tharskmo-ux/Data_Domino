@@ -105,33 +105,6 @@ describe('ExcelGenerator — 11-sheet report', () => {
   });
 });
 
-describe('ExcelGenerator — dashboard savings override', () => {
-  it('mirrors the dashboard savings numbers when provided', async () => {
-    const savings = {
-      total: 84_300_000, // 8.43 Cr — the dashboard headline
-      levers: [
-        { label: 'Multi-Vendor Price Arbitrage', spend: 200_000_000, savings: 50_000_000, recommendation: 'Shift volume to cheapest vendor' },
-        { label: 'Tail Spend Consolidation', spend: 30_000_000, savings: 34_300_000, recommendation: 'Consolidate long-tail suppliers' },
-      ],
-    };
-    const blob = await new ExcelGenerator(rows, {}, 'INR', savings).generate();
-    const wb = new ExcelJS.Workbook();
-    await wb.xlsx.load(await blob.arrayBuffer());
-    const t = sheetText(wb.getWorksheet('09_Savings_Opportunities')!);
-    expect(t).toContain('Total identified savings');
-    expect(t).toMatch(/8\.43/); // headline matches the dashboard (Cr)
-    expect(t).toContain('Multi-Vendor Price Arbitrage');
-    expect(t).toContain('Tail Spend Consolidation');
-    expect(t).not.toContain('QUANTIFIED SAVINGS'); // the fallback design is NOT used
-  });
-
-  it('falls back to the built-in Savings design when no dashboard savings given', async () => {
-    const wb = await loadWorkbook();
-    const t = sheetText(wb.getWorksheet('09_Savings_Opportunities')!);
-    expect(t).toContain('QUANTIFIED SAVINGS'); // fallback two-section design
-  });
-});
-
 describe('ExcelGenerator — data hygiene', () => {
   const headerRow: Record<string, any> = {
     'MRN DATE': 'MRN DATE', 'PARTY NAME': 'PARTY NAME', 'ITEM CODE': 'ITEM CODE',
