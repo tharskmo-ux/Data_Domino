@@ -695,7 +695,13 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
         //    harmonisation on single-UOM, ex-fuel items + freight. The 5-lever
         //    `totalIdentifiedSavings` is kept only as an INDICATIVE (softer) figure.
         const conservative = computeConservativeSavingsFromMappings(filteredRows, mappings);
-        const indicativeSavings = Math.min(totalIdentifiedSavings, totalSpend); // 5-lever upper bound
+        // 5-lever upper bound. When rows aren't loaded (restored state) it would collapse
+        // to 0, so fall back to the persisted indicative figure instead of showing Rs 0.
+        const restoredIndicative = restoredStats?.savingsPotentialMax ?? restoredAnalysis?.savingsPotentialMax
+            ?? restoredStats?.identifiedSavings ?? restoredAnalysis?.identifiedSavings ?? 0;
+        const indicativeSavings = isSyntheticFallback
+            ? (totalSpend > 0 ? Math.min(restoredIndicative, totalSpend) : restoredIndicative)
+            : Math.min(totalIdentifiedSavings, totalSpend);
 
         let identifiedSavings = !isSyntheticFallback
             ? conservative.firmSaving
