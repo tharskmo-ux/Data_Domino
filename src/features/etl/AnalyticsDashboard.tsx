@@ -45,6 +45,7 @@ import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
 import { db, storage } from '../../lib/firebase';
 import { getAutoMappings } from '../../utils/columnDetection';
+import { computeConservativeSavingsFromMappings } from '../../utils/savings';
 import { getAIInsights } from '../../services/aiService';
 import type { AIResponse } from '../../services/aiService';
 
@@ -355,7 +356,12 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
 
 
         // 1. Fiscal Year & Time Period Analysis
-        const now = new Date();
+        // Base the reference date on the LATEST date present in the data, not the wall
+        // clock. A historical upload (e.g. FY 2025-26) would otherwise show ₹0 for the
+        // "current" FY / YTD whenever today falls in a later fiscal year.
+        const _fyTimestamps = dateCol ? filteredRows.map(r => parseDateValue(r[dateCol])?.getTime() || 0) : [];
+        const _maxTs = _fyTimestamps.reduce((m, t) => (t > m ? t : m), 0);
+        const now = _maxTs > 0 ? new Date(_maxTs) : new Date();
         const getFY = (date: Date) => {
             const y = date.getFullYear();
             return date.getMonth() >= 3 ? y : y - 1; // April start
@@ -684,8 +690,15 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
             ? totalSpend * 0.12 // Force realistic 12% if saved data is suspiciously equal-to-spend
             : restoredRaw;
 
+        // ── Conservative, defensible savings (single source of truth shared with the
+        //    Excel report). This is the FIRM headline number: multi-vendor rate
+        //    harmonisation on single-UOM, ex-fuel items + freight. The 5-lever
+        //    `totalIdentifiedSavings` is kept only as an INDICATIVE (softer) figure.
+        const conservative = computeConservativeSavingsFromMappings(filteredRows, mappings);
+        const indicativeSavings = Math.min(totalIdentifiedSavings, totalSpend); // 5-lever upper bound
+
         let identifiedSavings = !isSyntheticFallback
-            ? totalIdentifiedSavings
+            ? conservative.firmSaving
             : (validatedRestoredSavings || projectStats?.savingsPotential || 0);
 
         // GLOBAL SAFETY CAP: Ensure total savings never exceeds addressable spend
@@ -1301,6 +1314,9 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                 .slice(0, 5),
             categoryData: hasLiveRows ? categoryData : (restoredAnalysis?.topCategoryData ?? []),
             identifiedSavings,
+            indicativeSavings,
+            rateHarmonisationSaving: conservative.rateHarmonisationSaving,
+            freightSaving: conservative.freightSaving,
             isSyntheticFallback,
             quickWinSavings: (effectiveBreakdown.priceArbitrage ?? (effectiveBreakdown as any).priceVariance ?? 0)
                 + (effectiveBreakdown.paymentTerms ?? 0),
@@ -1709,7 +1725,13 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                             </span>
                                         </div>
 
-                                        <h2 className="text-xl font-bold text-zinc-400 mb-2">Total Potential Savings Identified</h2>
+                                        <h2 className="text-xl font-bold text-zinc-400 mb-1">Defensible Savings Identified</h2>
+                                        <p className="text-[11px] text-zinc-500 mb-2">
+                                            Firm method: multi-vendor rate harmonisation (single-UOM, ex-fuel) + freight.
+                                            {dynamicStats.indicativeSavings > dynamicStats.identifiedSavings && (
+                                                <> Wider indicative opportunity incl. softer levers: <span className="text-zinc-400 font-semibold">{formatCurrency(dynamicStats.indicativeSavings)}</span> (requires validation).</>
+                                            )}
+                                        </p>
                                         <div className="flex items-baseline gap-4 mb-4 relative group/savings">
                                             <div className="relative">
                                                 <h1 className={cn(
@@ -2213,11 +2235,11 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                                     <span className="bg-emerald-500/10 text-emerald-500 text-[10px] font-black px-2 py-0.5 rounded-full border border-emerald-500/20 uppercase tracking-widest flex items-center gap-1">
                                                         <ShieldCheck className="w-3 h-3" /> Admin View Active
                                                     </span>
-                                                    <span className="text-zinc-500 text-[10px] font-bold uppercase tracking-widest">• Total Identified Opportunity: {formatCurrency(dynamicStats.identifiedSavings)}</span>
+                                                    <span className="text-zinc-500 text-[10px] font-bold uppercase tracking-widest">• Indicative Opportunity: {formatCurrency(dynamicStats.indicativeSavings)}</span>
                                                 </div>
                                             )}
                                             <h3 className="text-2xl font-bold text-white">Savings & ROI Analysis</h3>
-                                            <p className="text-zinc-500 text-sm">Actionable opportunities to reduce spend</p>
+                                            <p className="text-zinc-500 text-sm">Indicative opportunities across 5 levers — requires validation. Firm/defensible figure is {formatCurrency(dynamicStats.identifiedSavings)} (rate harmonisation + freight).</p>
                                         </div>
                                     </div>
                                     <button
@@ -2255,16 +2277,14 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                         !checkAccess('savings_roi') && "blur-xl pointer-events-none select-none opacity-50"
                                     )}>
                                         <div className="flex items-center gap-2 mb-4">
-                                            <span className="text-[10px] font-black text-primary uppercase tracking-widest block">Total Potential ROI</span>
-                                            {dynamicStats.isSyntheticFallback && (
-                                                <span className="text-[9px] font-black bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2 py-0.5 rounded-full uppercase tracking-widest">Estimated</span>
-                                            )}
+                                            <span className="text-[10px] font-black text-primary uppercase tracking-widest block">Indicative Opportunity</span>
+                                            <span className="text-[9px] font-black bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2 py-0.5 rounded-full uppercase tracking-widest">{dynamicStats.isSyntheticFallback ? 'Estimated' : 'Requires validation'}</span>
                                         </div>
-                                        <div className="text-4xl font-black text-white mb-2">{formatCurrency(dynamicStats.identifiedSavings)}</div>
+                                        <div className="text-4xl font-black text-white mb-2">{formatCurrency(dynamicStats.indicativeSavings)}</div>
                                         <p className="text-xs text-zinc-500">
                                             {dynamicStats.isSyntheticFallback
                                                 ? 'Restored from prior analysis — upload live data for row-level calculations'
-                                                : 'Calculated row-by-row across 5 procurement levers'}
+                                                : 'Upper-bound across 5 levers. Firm figure (rate harmonisation + freight): ' + formatCurrency(dynamicStats.identifiedSavings)}
                                         </p>
                                     </div>
                                     <div className={cn(

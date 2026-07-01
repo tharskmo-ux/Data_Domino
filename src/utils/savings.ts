@@ -55,6 +55,39 @@ export interface ConservativeSavings {
 // Categories treated as timing/commodity plays rather than vendor-rate plays.
 export const FUEL_RE = /fuel|biomass|husk|petroleum|lpg|agri/i;
 
+/** Pick the first candidate key that exists on the sample row (mirrors ExcelGenerator). */
+function resolveKey(sample: Record<string, any> | undefined, candidates: Array<string | undefined>, fallback: string): string {
+    if (sample) for (const c of candidates) { if (c && Object.prototype.hasOwnProperty.call(sample, c)) return c; }
+    return fallback;
+}
+
+/**
+ * Resolve the savings columns from a mapping object + a sample row, using the SAME
+ * fallback names the ExcelGenerator uses — so the dashboard and the report resolve
+ * to identical columns and therefore identical numbers.
+ */
+export function resolveSavingsColumns(sample: Record<string, any> | undefined, m: Record<string, any> = {}): SavingsColumns {
+    return {
+        itemKey: resolveKey(sample, [m.item_code, 'ITEM CODE', 'Item Code'], 'Item Code'),
+        vendorKey: resolveKey(sample, [m.supplier, m.vendor, 'PARTY NAME', 'Vendor'], 'Vendor'),
+        uomKey: resolveKey(sample, [m.uom, 'UOM'], 'UOM'),
+        qtyKey: resolveKey(sample, [m.quantity, 'QTY RCVD.', 'QTY RCVD', 'Qty'], 'Qty'),
+        amountKey: resolveKey(sample, [m.amount, m.invoice_amount, 'BASIC AMOUNT', 'Basic Amount'], 'Amount'),
+        categoryKey: resolveKey(sample, [m.category_l1, m.category, 'category_l1', 'category', 'Category', 'CATEGORY'], 'category'),
+        descKey: resolveKey(sample, [m.item_description, 'ITEM DESC.', 'ITEM DESC', 'Item Description'], 'Item Description'),
+        freightKey: resolveKey(sample, [m.freight, 'FREIGHT', 'Freight'], 'Freight'),
+    };
+}
+
+/** Convenience: resolve columns from mappings, then compute. Used by the dashboard. */
+export function computeConservativeSavingsFromMappings(
+    rows: Array<Record<string, any>>,
+    mappings: Record<string, any> = {},
+    freightRate = 0.15,
+): ConservativeSavings {
+    return computeConservativeSavings(rows, resolveSavingsColumns(rows[0], mappings), freightRate);
+}
+
 const num = (v: any): number => {
     const n = parseFloat(String(v ?? '').replace(/[^0-9.\-]/g, ''));
     return Number.isFinite(n) ? n : 0;
