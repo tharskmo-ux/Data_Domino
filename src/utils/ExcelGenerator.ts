@@ -135,14 +135,30 @@ const GST_STATE: Record<string, string> = {
     '38': 'Ladakh', '97': 'Other Territory',
 };
 
+// Two-letter state abbreviations (catch values like "/ PB" that lost the numeric code).
+const STATE_ABBR: Record<string, string> = {
+    PB: 'Punjab', HR: 'Haryana', HP: 'Himachal Pradesh', JK: 'Jammu & Kashmir', CH: 'Chandigarh',
+    UK: 'Uttarakhand', UA: 'Uttarakhand', DL: 'Delhi', RJ: 'Rajasthan', UP: 'Uttar Pradesh',
+    BR: 'Bihar', WB: 'West Bengal', JH: 'Jharkhand', OD: 'Odisha', OR: 'Odisha', CG: 'Chhattisgarh',
+    MP: 'Madhya Pradesh', GJ: 'Gujarat', MH: 'Maharashtra', KA: 'Karnataka', GA: 'Goa', KL: 'Kerala',
+    TN: 'Tamil Nadu', TG: 'Telangana', TS: 'Telangana', AP: 'Andhra Pradesh', AS: 'Assam',
+    DD: 'Daman & Diu', DN: 'Dadra & Nagar Haveli', PY: 'Puducherry', MN: 'Manipur', ML: 'Meghalaya',
+    MZ: 'Mizoram', NL: 'Nagaland', TR: 'Tripura', SK: 'Sikkim', AR: 'Arunachal Pradesh',
+    LA: 'Ladakh', AN: 'Andaman & Nicobar', LD: 'Lakshadweep',
+};
+
 /** Resolve a raw state / GSTIN / "03/PB" value to a full state name. */
-function stateName(raw: any): string {
+export function stateName(raw: any): string {
     const s = String(raw ?? '').trim();
     if (!s) return 'Unspecified';
+    if (/^\s*IM\b/i.test(s)) return 'Import'; // import entries: "IM/ FRANCE", "IM/ NC"
     const code = s.slice(0, 2);
     if (GST_STATE[code]) return GST_STATE[code];
     const m = s.match(/\b(\d{2})\b/);
     if (m && GST_STATE[m[1]]) return GST_STATE[m[1]];
+    // A bare 2-letter state abbreviation anywhere in the value (e.g. "/ PB").
+    const ab = s.toUpperCase().match(/\b([A-Z]{2})\b/);
+    if (ab && STATE_ABBR[ab[1]]) return STATE_ABBR[ab[1]];
     // Already a name (possibly prefixed like "03-PUNJAB"): strip a leading code.
     return s.replace(/^\d{2}[\s/\-]*/, '').trim() || s;
 }

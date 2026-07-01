@@ -1,6 +1,18 @@
 import { describe, it, expect } from 'vitest';
 import ExcelJS from 'exceljs';
-import { ExcelGenerator } from './ExcelGenerator';
+import { ExcelGenerator, stateName } from './ExcelGenerator';
+
+describe('stateName', () => {
+  it('maps GST codes and abbreviations to full names', () => {
+    expect(stateName('03/PB')).toBe('Punjab');
+    expect(stateName('24-GUJARAT')).toBe('Gujarat');
+    expect(stateName('27ABCDE1234F1Z5')).toBe('Maharashtra'); // GSTIN
+    expect(stateName('/ PB')).toBe('Punjab'); // code lost, abbreviation only
+    expect(stateName('IM/ FRANCE')).toBe('Import');
+    expect(stateName('IM/ NC')).toBe('Import');
+    expect(stateName('')).toBe('Unspecified');
+  });
+});
 
 // Aarti-shaped rows with the lowercase `category` the CategoryMapper writes.
 const rows: Array<Record<string, any>> = [
