@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import ExcelJS from 'exceljs';
-import { computeConservativeSavings, SavingsColumns } from './savings';
+import { computeConservativeSavings, type SavingsColumns } from './savings';
 import { ExcelGenerator } from './ExcelGenerator';
 
 const COLS: SavingsColumns = {
