@@ -27,6 +27,13 @@ export function loadUserRules(scope: string): UserRule[] {
   }
 }
 
+/** Overwrite the local cache with a full rules array (used to mirror Firestore). */
+export function saveLocalRules(scope: string, rules: UserRule[]): void {
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.setItem(storeKey(scope), JSON.stringify(rules));
+  } catch { /* ignore */ }
+}
+
 /** Add/replace a rule (dedup by level+key) and persist. Returns the updated list. */
 export function saveUserRule(scope: string, rule: UserRule): UserRule[] {
   const key = String(rule.key || '').trim().toLowerCase();

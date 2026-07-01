@@ -7,6 +7,7 @@ import { getClassifier } from '../../utils/categorization/llm';
 import { resolveSubLevels } from '../../utils/categorization/hierarchy';
 import { TAXONOMY } from '../../utils/categorization/taxonomy';
 import { loadUserRules, saveUserRule, applyUserRules, type UserRule } from '../../utils/categorization/userRules';
+import { fetchUserRules, persistUserRulesToCloud } from '../../services/userRulesStore';
 import { useEffectiveUid } from '../../hooks/useEffectiveUid';
 
 // Cap how many item cards render at once. With 18k rows there can be thousands of
@@ -40,7 +41,12 @@ const CategoryMapper: React.FC<CategoryMapperProps> = ({ data, mappings, onCompl
     const scope = useEffectiveUid() || 'default';
     const [rememberRule, setRememberRule] = useState(true);
     const [userRules, setUserRules] = useState<UserRule[]>([]);
-    useEffect(() => { setUserRules(loadUserRules(scope)); }, [scope]);
+    useEffect(() => {
+        setUserRules(loadUserRules(scope));            // instant, from local cache
+        let alive = true;
+        fetchUserRules(scope).then((r) => { if (alive) setUserRules(r); }); // then sync from Firestore
+        return () => { alive = false; };
+    }, [scope]);
 
     // Dynamic Column Selection based on Active Level
     // If specific level mapping exists, use it.
@@ -241,10 +247,14 @@ const CategoryMapper: React.FC<CategoryMapperProps> = ({ data, mappings, onCompl
         });
         setLocalData(updated);
 
-        // Part B: remember this mapping so future files auto-apply it.
+        // Part B: remember this mapping so future files auto-apply it (local + Firestore sync).
         if (rememberRule && itemDesc) {
             const key = itemDesc.split('[')[0].trim();
-            if (key) setUserRules(saveUserRule(scope, { key, category: newCategory, level: activeLevel }));
+            if (key) {
+                const next = saveUserRule(scope, { key, category: newCategory, level: activeLevel });
+                setUserRules(next);
+                void persistUserRulesToCloud(scope, next);
+            }
         }
     };
 
