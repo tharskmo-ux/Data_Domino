@@ -1078,8 +1078,41 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
             }
         };
 
+        // Execution roadmap — firm first, then indicative. Phase 1 is the defensible saving
+        // (rate harmonisation + freight); later phases are the wider levers, clearly flagged.
+        const _bd = effectiveBreakdown as any;
+        const _phase2 = (_bd.volumeDiscount ?? 0) + (_bd.singleSource ?? 0);
+        const _phase3 = (_bd.paymentTerms ?? 0) + (_bd.tailSpend ?? 0);
+        const executionRoadmap = [
+            {
+                phase: 'Phase 1', timeline: '0–3 months', tier: 'firm', value: identifiedSavings,
+                title: 'Rate harmonisation & freight',
+                actions: [
+                    'Consolidate multi-vendor, single-UOM items to the best qualified vendor rate (fuel & agri excluded).',
+                    'Tier freight and renegotiate logistics against benchmarked lanes.',
+                ],
+            },
+            {
+                phase: 'Phase 2', timeline: '3–6 months', tier: 'indicative', value: _phase2,
+                title: 'Volume commitments & alternate sourcing',
+                actions: [
+                    'Negotiate annual volume commitments on fragmented, high-frequency spend.',
+                    'Qualify at least one alternate vendor for sole-sourced items via RFQ.',
+                ],
+            },
+            {
+                phase: 'Phase 3', timeline: '6–12 months', tier: 'indicative', value: _phase3,
+                title: 'Payment terms & tail consolidation',
+                actions: [
+                    'Standardise / extend payment terms where working-capital-positive.',
+                    'Consolidate long-tail suppliers into preferred-vendor or P-card programs.',
+                ],
+            },
+        ];
+
         return {
             filteredRows, // Expose for export
+            executionRoadmap,
             totalSpend,
             fySpend,
             ytdSpend,
@@ -2435,7 +2468,37 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                         "bg-zinc-900/40 border border-zinc-900 rounded-[2.5rem] p-8 transition-all duration-1000",
                                         isAdmin ? "opacity-100" : "blur-3xl saturate-0 opacity-20 pointer-events-none select-none group-hover/bottom:blur-xl"
                                     )}>
-                                        <h3 className="text-xl font-bold">Execution Roadmap</h3>
+                                        <h3 className="text-xl font-bold mb-1">Execution Roadmap</h3>
+                                        <p className="text-xs text-zinc-500 mb-6">Phase 1 is firm and negotiable now; later phases are indicative and need validation.</p>
+                                        <div className="space-y-4">
+                                            {dynamicStats.executionRoadmap?.map((ph: any, i: number) => (
+                                                <div key={i} className="flex items-start gap-4 p-4 rounded-2xl bg-zinc-900/50 border border-zinc-800">
+                                                    <div className="shrink-0 w-24">
+                                                        <div className="text-sm font-black text-white">{ph.phase}</div>
+                                                        <div className="text-[10px] text-zinc-500 uppercase tracking-widest">{ph.timeline}</div>
+                                                    </div>
+                                                    <div className="flex-1">
+                                                        <div className="flex flex-wrap items-center gap-2 mb-2">
+                                                            <span className="text-sm font-bold text-white">{ph.title}</span>
+                                                            <span className={cn(
+                                                                "text-[9px] font-black px-2 py-0.5 rounded-full border uppercase tracking-widest",
+                                                                ph.tier === 'firm'
+                                                                    ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
+                                                                    : "bg-amber-500/10 text-amber-400 border-amber-500/20"
+                                                            )}>
+                                                                {ph.tier === 'firm' ? 'Solid' : 'Needs validation'}
+                                                            </span>
+                                                            <span className="ml-auto text-sm font-black text-white">{formatCurrency(ph.value)}</span>
+                                                        </div>
+                                                        <ul className="list-disc list-inside space-y-1">
+                                                            {ph.actions.map((a: string, j: number) => (
+                                                                <li key={j} className="text-xs text-zinc-400">{a}</li>
+                                                            ))}
+                                                        </ul>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
                                     </div>
                                 </div>
 
