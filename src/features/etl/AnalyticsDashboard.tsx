@@ -845,10 +845,10 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
         // Each opportunity carries gross savings, probability, and expected (risk-adjusted) value.
         const leverMeta: Record<string, { label: string; color: string; recommendation: string; calcFn: (d: typeof opportunityDetails[string]) => string }> = {
             priceArbitrage: {
-                label: 'Multi-Vendor Price Arbitrage',
-                color: 'rose',
-                recommendation: 'Consolidate 85% of higher-priced volume to lowest-priced qualified vendor for each item sourced from multiple suppliers.',
-                calcFn: (d) => `85% volume shift to cheapest vendor on ${formatCurrency(d.spend)} multi-source spend — Σ (price_gap × 0.85 × qty)`,
+                label: 'Rate Harmonisation & Freight',
+                color: 'emerald',
+                recommendation: 'Move multi-vendor, single-UOM items to the best qualified vendor rate (fuel & agri excluded), and tier freight against benchmarked lanes. Firm, report-backed number.',
+                calcFn: () => `Σ (weighted price paid − best vendor rate) × qty on comparable multi-vendor items (ex-fuel) + conservative freight tiering`,
             },
             paymentTerms: {
                 label: 'Payment Terms Optimisation',
@@ -876,14 +876,27 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
             },
         };
 
+        // Align the price-arbitrage lever to the FIRM, defensible number (same as the report
+        // headline): override its saving with the conservative firm figure and strip fuel/agri
+        // from its displayed categories (the firm method excludes them).
+        const _fuelCat = /fuel|biomass|husk|petroleum|lpg|agri/i;
+        if (opportunityDetails.priceArbitrage) {
+            opportunityDetails.priceArbitrage.savings = conservative.firmSaving;
+            opportunityDetails.priceArbitrage.categories = new Set(
+                Array.from(opportunityDetails.priceArbitrage.categories).filter(c => !_fuelCat.test(String(c)))
+            );
+        }
+
         const opportunityRanking = Object.entries(opportunityDetails)
             .filter(([_, d]) => d.savings > 0)
             .map(([key, d]) => {
                 const meta = leverMeta[key] ?? { label: key, color: 'zinc', recommendation: '', calcFn: () => '' };
-                const prob = leverProbabilities[key as keyof typeof leverProbabilities] ?? 50;
+                const isFirm = key === 'priceArbitrage';
+                const prob = isFirm ? 95 : (leverProbabilities[key as keyof typeof leverProbabilities] ?? 50);
                 const expectedSavings = d.savings * prob / 100;
                 return {
                     id: key,
+                    tier: isFirm ? 'firm' : 'indicative',
                     label: meta.label,
                     value: d.savings,             // gross savings
                     expectedValue: expectedSavings, // risk-adjusted
@@ -902,8 +915,9 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                     calculation: meta.calcFn(d),
                 };
             })
-            .sort((a, b) => b.expectedValue - a.expectedValue) // rank by risk-adjusted value
-            .slice(0, 5); // show all 5 levers (filtered to those with savings > 0)
+            // Firm (defensible) opportunity first, then indicative levers by expected value.
+            .sort((a, b) => (a.tier === b.tier ? b.expectedValue - a.expectedValue : a.tier === 'firm' ? -1 : 1))
+            .slice(0, 5);
 
         // ── DATA-DRIVEN SAVINGS LEVERS ────────────────────────────────────────────
         // FIX 7+8+9: Probabilities are fully derived from actual dataset signals.
@@ -2320,7 +2334,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                     )}>
                                         <span className="text-[10px] font-black text-emerald-500 uppercase tracking-widest mb-4 block">Quick-Win Savings</span>
                                         <div className="text-4xl font-black text-white mb-2">{formatCurrency(dynamicStats.quickWinSavings)}</div>
-                                        <p className="text-xs text-zinc-500">Price arbitrage &amp; payment terms optimisation (actionable now)</p>
+                                        <p className="text-xs text-zinc-500">Price arbitrage &amp; payment terms (indicative — needs validation)</p>
                                     </div>
                                     <div className={cn(
                                         "bg-amber-500/5 border border-amber-500/20 rounded-3xl p-8 border-b-4 border-b-amber-500 transition-all",
@@ -2335,7 +2349,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                 <div className="space-y-6">
                                     <div className="flex items-center justify-between">
                                         <h4 className="text-lg font-bold text-white uppercase tracking-tighter">Top Savings Opportunities</h4>
-                                        <span className="text-zinc-500 text-[10px] font-bold uppercase tracking-widest">Ranked by risk-adjusted expected value</span>
+                                        <span className="text-zinc-500 text-[10px] font-bold uppercase tracking-widest">Firm saving first, then indicative levers</span>
                                     </div>
 
                                     <div className="grid grid-cols-1 gap-4">
@@ -2361,12 +2375,20 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                                         <div className="text-xl font-black text-primary">{formatCurrency(opp.value)}</div>
                                                         <div className="text-[10px] font-bold text-zinc-400">{opp.percent.toFixed(1)}% of addressable spend</div>
                                                         <div className="mt-1 flex items-center justify-end gap-2">
-                                                            <span className="bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-widest">
-                                                                {opp.probability}% probability
-                                                            </span>
-                                                            <span className="text-[10px] font-bold text-emerald-400">
-                                                                Risk-adj: {formatCurrency(opp.expectedValue)}
-                                                            </span>
+                                                            {opp.tier === 'firm' ? (
+                                                                <span className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-widest">
+                                                                    Firm • matches report
+                                                                </span>
+                                                            ) : (
+                                                                <>
+                                                                    <span className="bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-widest">
+                                                                        Indicative
+                                                                    </span>
+                                                                    <span className="text-[10px] font-bold text-zinc-500">
+                                                                        Risk-adj: {formatCurrency(opp.expectedValue)}
+                                                                    </span>
+                                                                </>
+                                                            )}
                                                         </div>
                                                     </div>
                                                 </div>
