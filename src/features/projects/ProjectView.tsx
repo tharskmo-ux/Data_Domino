@@ -1356,7 +1356,26 @@ const ProjectView: React.FC = () => {
             // Produce the full 11-sheet analyst report (not a raw dump). Smart auto-
             // detection resolves the columns even if the mapping step was light.
             const resolvedMappings = getAutoMappings(pd.raw, pd.mappings || {});
-            const generator = new ExcelGenerator(pd.raw, resolvedMappings, pd.currency || 'INR');
+
+            // Mirror the dashboard's saved savings so the Excel Savings sheet matches
+            // the on-screen numbers (single source of truth).
+            const LEVER_META: Record<string, { label: string; rec: string }> = {
+                priceArbitrage: { label: 'Multi-Vendor Price Arbitrage', rec: 'Consolidate higher-priced volume to the lowest-priced qualified vendor for each multi-sourced item.' },
+                paymentTerms: { label: 'Payment Terms Optimisation', rec: 'Renegotiate cash / advance / net-7 terms towards net-30+.' },
+                volumeDiscount: { label: 'Volume Commitment Discount', rec: 'Consolidate fragmented purchase orders and negotiate annual volume commitments.' },
+                singleSource: { label: 'Alternate Vendor Introduction', rec: 'Qualify an alternate supplier for sole-sourced items to create competitive tension.' },
+                tailSpend: { label: 'Tail Spend Consolidation', rec: 'Consolidate long-tail suppliers into preferred-vendor programs or purchasing cards.' },
+            };
+            const dashboardSavings = (identifiedSavings > 0 && savingsBreakdown)
+                ? {
+                    total: identifiedSavings,
+                    levers: Object.entries(savingsBreakdown)
+                        .filter(([k, v]) => LEVER_META[k] && Number(v) > 0)
+                        .map(([k, v]) => ({ label: LEVER_META[k].label, spend: 0, savings: Number(v), recommendation: LEVER_META[k].rec })),
+                }
+                : undefined;
+
+            const generator = new ExcelGenerator(pd.raw, resolvedMappings, pd.currency || 'INR', dashboardSavings);
             const blob = await generator.generate();
             const fileName = `DataDomino_${(currentProject?.name ?? 'Analysis').replace(/\s+/g, '_')}_${Date.now()}.xlsx`;
             const url = URL.createObjectURL(blob);

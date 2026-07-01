@@ -1367,7 +1367,21 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
             const resolvedMappings = getAutoMappings(rowsToExport, baseMappings);
             const resolvedCurrency = currency || restoredAnalysis?.currency || 'INR';
 
-            const generator = new ExcelGenerator(rowsToExport, resolvedMappings, resolvedCurrency);
+            // Pass the dashboard's own computed savings so the Excel Savings sheet shows
+            // the SAME numbers the user sees on screen (single source of truth).
+            const dashboardSavings = (dynamicStats?.identifiedSavings > 0 && Array.isArray(dynamicStats?.opportunityRanking) && dynamicStats.opportunityRanking.length > 0)
+                ? {
+                    total: dynamicStats.identifiedSavings,
+                    levers: dynamicStats.opportunityRanking.map((o: any) => ({
+                        label: o.label,
+                        spend: o.currentSpend ?? 0,
+                        savings: o.value ?? 0,
+                        recommendation: o.recommendation ?? '',
+                    })),
+                }
+                : undefined;
+
+            const generator = new ExcelGenerator(rowsToExport, resolvedMappings, resolvedCurrency, dashboardSavings);
             const blob = await generator.generate();
 
             // Trigger browser download

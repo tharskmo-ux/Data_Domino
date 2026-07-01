@@ -209,10 +209,21 @@ function classifyABC<T extends { spend: number }>(rows: T[], total: number): Arr
 // ExcelGenerator
 // ===========================================================================
 
+/**
+ * Pre-computed savings from the dashboard, so the Savings sheet shows the SAME
+ * numbers the user sees on screen (single source of truth). When omitted, the
+ * generator falls back to its own conservative estimate.
+ */
+export interface DashboardSavings {
+    total: number; // total identified savings (matches the dashboard headline)
+    levers: Array<{ label: string; spend: number; savings: number; recommendation?: string }>;
+}
+
 export class ExcelGenerator {
     private wb: ExcelJS.Workbook;
     private data: DataRow[];
     private m: Mappings;
+    private dashSavings?: DashboardSavings;
 
     // resolved column keys
     private amtKey: string;     // BASIC AMOUNT (pre-tax spend)
@@ -235,10 +246,11 @@ export class ExcelGenerator {
     private billNoKey: string;  // BILL NO
     private poNoKey: string;    // PO NO
 
-    constructor(data: DataRow[], mappings: Mappings, _currency = 'INR') {
+    constructor(data: DataRow[], mappings: Mappings, _currency = 'INR', savings?: DashboardSavings) {
         this.wb = new ExcelJS.Workbook();
         this.data = data ?? [];
         this.m = mappings ?? {};
+        this.dashSavings = savings && savings.total > 0 ? savings : undefined;
 
         const s = this.data[0];
         // Resolve once, with fallbacks to the common raw ERP header names so the
@@ -711,6 +723,10 @@ export class ExcelGenerator {
     // SHEET 05 — Savings Opportunities (quantified + structural)
     // -----------------------------------------------------------------------
     private createSavings(stats: ReturnType<ExcelGenerator['buildStats']>) {
+        // When the dashboard passed its own computed savings, mirror them exactly so
+        // the sheet and the on-screen headline always agree (single source of truth).
+        if (this.dashSavings) { this.createSavingsFromDashboard(this.dashSavings); return; }
+
         const ws = this.wb.addWorksheet(SHEETS.savings, { views: [{ showGridLines: false }] });
         const widths = [26, 50, 18, 40, 46];
         widths.forEach((w, i) => (ws.getColumn(i + 1).width = w));
@@ -807,6 +823,67 @@ export class ExcelGenerator {
             ws.getRow(r).height = 50;
             r++;
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // SHEET 09 — Savings, mirroring the dashboard's computed levers exactly.
+    // Same total + same per-lever numbers the user sees on screen.
+    // -----------------------------------------------------------------------
+    private createSavingsFromDashboard(sv: DashboardSavings) {
+        const ws = this.wb.addWorksheet(SHEETS.savings, { views: [{ showGridLines: false }] });
+        const widths = [34, 18, 18, 10, 58];
+        widths.forEach((w, i) => (ws.getColumn(i + 1).width = w));
+
+        this.styleTitle(ws.getCell('A1'), 'Savings Opportunities');
+        const intro = ws.getCell('A2');
+        intro.value = 'Identified savings across pricing levers. These figures match the Analytics dashboard exactly.';
+        intro.font = { italic: true, color: { argb: SUBTLE_TEXT } };
+        ws.mergeCells('A2:E2');
+        intro.alignment = { wrapText: true };
+
+        // Headline — the same number shown on the dashboard.
+        const head = ws.getCell('A4');
+        head.value = `Total identified savings: ${this.fmtCr(sv.total)}`;
+        head.font = { bold: true, size: 14, color: { argb: TITLE_TEXT } };
+        ws.mergeCells('A4:E4');
+
+        let r = 6;
+        const hdr = ws.getRow(r);
+        hdr.values = ['Lever', 'Spend touched (Rs)', 'Saving (Rs)', '% of spend', 'Recommended action'];
+        this.styleHeaderRow(hdr); r++;
+
+        const firstRow = r;
+        for (const lever of sv.levers) {
+            const hasSpend = lever.spend > 0;
+            const xr = ws.getRow(r);
+            xr.values = [
+                lever.label,
+                hasSpend ? lever.spend : '',
+                lever.savings,
+                hasSpend ? lever.savings / lever.spend : '',
+                lever.recommendation || '',
+            ];
+            if (hasSpend) { xr.getCell(2).numFmt = '#,##0'; xr.getCell(4).numFmt = '0.0%'; }
+            xr.getCell(3).numFmt = '#,##0';
+            xr.alignment = { vertical: 'top', wrapText: true };
+            ws.getRow(r).height = 40;
+            r++;
+        }
+
+        // Total row — SUM of the lever savings reconciles to the headline.
+        const tot = ws.getRow(r);
+        tot.getCell(1).value = 'TOTAL';
+        tot.getCell(3).value = sv.levers.length ? { formula: `SUM(C${firstRow}:C${r - 1})` } : sv.total;
+        tot.getCell(3).numFmt = '#,##0';
+        [1, 2, 3, 4].forEach((c) => { tot.getCell(c).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: TOTAL_FILL } }; tot.getCell(c).font = { bold: true }; });
+
+        r += 2;
+        const note = ws.getCell(`A${r}`);
+        note.value = 'Each transaction is assigned to a single highest-priority lever, so lever spends do not double-count. Savings use conservative per-lever benchmarks (price arbitrage 85% volume shift, payment terms 1.5–2.5%, volume 3%, single-source 5%, tail 6%).';
+        note.font = { size: 10, color: { argb: SUBTLE_TEXT } };
+        note.alignment = { wrapText: true };
+        ws.mergeCells(`A${r}:E${r}`);
+        ws.getRow(r).height = 40;
     }
 
     // -----------------------------------------------------------------------
