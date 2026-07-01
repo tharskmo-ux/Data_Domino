@@ -1,10 +1,13 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { Check, AlertTriangle, ArrowRight, Search, Tag, Upload, Sparkles } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { cn } from '../../lib/utils';
 import { categorize } from '../../utils/categorization/categorize';
 import { getClassifier } from '../../utils/categorization/llm';
 import { resolveSubLevels } from '../../utils/categorization/hierarchy';
+import { TAXONOMY } from '../../utils/categorization/taxonomy';
+import { loadUserRules, saveUserRule, applyUserRules, type UserRule } from '../../utils/categorization/userRules';
+import { useEffectiveUid } from '../../hooks/useEffectiveUid';
 
 // Cap how many item cards render at once. With 18k rows there can be thousands of
 // distinct-description groups; rendering them all (each an animated card) freezes
@@ -33,6 +36,12 @@ const CategoryMapper: React.FC<CategoryMapperProps> = ({ data, mappings, onCompl
     const [applyToSimilar, setApplyToSimilar] = useState(true);
     const [customTaxonomy, setCustomTaxonomy] = useState<any[] | null>(null);
 
+    // ── User-taught rules (Part B): persisted per user, applied on future files ──
+    const scope = useEffectiveUid() || 'default';
+    const [rememberRule, setRememberRule] = useState(true);
+    const [userRules, setUserRules] = useState<UserRule[]>([]);
+    useEffect(() => { setUserRules(loadUserRules(scope)); }, [scope]);
+
     // Dynamic Column Selection based on Active Level
     // If specific level mapping exists, use it.
     // For L1, fallback to generic 'category'.
@@ -44,6 +53,24 @@ const CategoryMapper: React.FC<CategoryMapperProps> = ({ data, mappings, onCompl
         activeLevel === 'l3' ? mappings['category_l2'] : undefined;
 
     const descriptionCol = mappings['item_description'] || mappings['description'] || mappings['item'] || mappings['material']; // Fallback for context
+
+    // Options for the category picker at the active level. L1 = fixed taxonomy (or an
+    // uploaded custom one); L2/L3 = distinct values already present (open-ended, new allowed).
+    const pickerOptions = useMemo(() => {
+        if (activeLevel === 'l1') {
+            if (customTaxonomy && customTaxonomy.length) {
+                const names = customTaxonomy.map((t: any) => t.category || t.l1 || t.name || t.Category).filter(Boolean);
+                return [...new Set(names)] as string[];
+            }
+            return [...TAXONOMY];
+        }
+        const seen = new Set<string>();
+        for (const row of localData) {
+            const v = String(row[categoryCol] ?? '').trim();
+            if (v && v !== 'Uncategorized' && v !== 'Other / Review') seen.add(v);
+        }
+        return [...seen].sort();
+    }, [activeLevel, customTaxonomy, localData, categoryCol]);
 
     // Auto-categorization (HSN -> keyword -> optional AI). Fills empty categories only.
     const [autoBusy, setAutoBusy] = useState(false);
@@ -77,10 +104,13 @@ const CategoryMapper: React.FC<CategoryMapperProps> = ({ data, mappings, onCompl
                 const { l2, l3 } = resolveSubLevels(res.category, String(row[hsnKey] ?? ''), String(row[descKey] ?? ''));
                 return { ...row, [categoryCol]: res.category, category_l2: l2, category_l3: l3 };
             });
-            setLocalData(next);
+            // Apply the user's own remembered rules to fill remaining unmapped items.
+            const ruled = applyUserRules(next, { descKey, catCol: categoryCol, level: activeLevel }, userRules);
+            setLocalData(ruled.rows);
             setAutoSummary(
                 `Auto-categorized — HSN ${by.hsn || 0}, keyword ${by.keyword || 0}, ` +
-                `AI ${by.ai || 0}, review ${by.unmapped || 0}.`,
+                `AI ${by.ai || 0}` + (ruled.applied ? `, your rules ${ruled.applied}` : '') +
+                `, review ${Math.max(0, (by.unmapped || 0) - ruled.applied)}.`,
             );
         } finally {
             setAutoBusy(false);
@@ -210,6 +240,12 @@ const CategoryMapper: React.FC<CategoryMapperProps> = ({ data, mappings, onCompl
             updated[id] = { ...updated[id], [categoryCol]: newCategory };
         });
         setLocalData(updated);
+
+        // Part B: remember this mapping so future files auto-apply it.
+        if (rememberRule && itemDesc) {
+            const key = itemDesc.split('[')[0].trim();
+            if (key) setUserRules(saveUserRule(scope, { key, category: newCategory, level: activeLevel }));
+        }
     };
 
     const handleTaxonomyUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -456,6 +492,16 @@ const CategoryMapper: React.FC<CategoryMapperProps> = ({ data, mappings, onCompl
                         <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Apply to Similar</span>
                     </label>
 
+                    <label className="flex items-center gap-2 cursor-pointer group" title="Remember this mapping and auto-apply it to matching items in future uploads">
+                        <div className={cn(
+                            "w-4 h-4 rounded border flex items-center justify-center transition-all",
+                            rememberRule ? "bg-primary border-primary" : "border-zinc-700 bg-zinc-950 group-hover:border-zinc-500"
+                        )} onClick={() => setRememberRule(!rememberRule)}>
+                            {rememberRule && <Check className="h-3 w-3 text-white" />}
+                        </div>
+                        <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Remember for future files{userRules.length ? ` (${userRules.length})` : ''}</span>
+                    </label>
+
                     <label className="flex items-center gap-2 px-3 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg cursor-pointer hover:border-primary/50 transition-all text-[10px] font-bold text-zinc-400 uppercase tracking-widest">
                         <Upload className="h-3.5 w-3.5" />
                         Taxonomy
@@ -502,29 +548,37 @@ const CategoryMapper: React.FC<CategoryMapperProps> = ({ data, mappings, onCompl
                             </div>
 
                             <div className="relative">
-                                <input
-                                    type="text"
-                                    placeholder={`Assign ${activeLevel.toUpperCase()}...`}
-                                    onKeyDown={(e) => {
-                                        if (e.key === 'Enter') {
-                                            handleAssignCategory(group.ids, e.currentTarget.value, group.desc);
-                                        }
-                                    }}
-                                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-4 py-2 text-sm text-white focus:ring-1 focus:ring-primary focus:border-primary transition-all"
-                                />
-                                {customTaxonomy && (
-                                    <div className="absolute right-3 top-2.5 flex items-center gap-1 text-[10px] text-primary font-bold uppercase pointer-events-none">
-                                        <Sparkles className="h-3 w-3" /> Taxonomy Smart
-                                    </div>
-                                )}
-                                {!customTaxonomy && (
-                                    <div className="absolute right-3 top-2.5 text-[10px] text-zinc-600 font-bold uppercase pointer-events-none">
-                                        Press Enter
-                                    </div>
+                                {activeLevel === 'l1' ? (
+                                    // L1 — strict dropdown of valid categories (foolproof, no typos)
+                                    <select
+                                        defaultValue=""
+                                        onChange={(e) => { if (e.target.value) handleAssignCategory(group.ids, e.target.value, group.desc); }}
+                                        className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-4 py-2 text-sm text-white focus:ring-1 focus:ring-primary focus:border-primary transition-all appearance-none cursor-pointer"
+                                    >
+                                        <option value="" disabled>Pick a category…</option>
+                                        {pickerOptions.map((opt) => (<option key={opt} value={opt}>{opt}</option>))}
+                                    </select>
+                                ) : (
+                                    // L2/L3 — combobox: pick a suggestion or type a new value
+                                    <>
+                                        <input
+                                            type="text"
+                                            list="dd-cat-options"
+                                            placeholder={`Assign ${activeLevel.toUpperCase()}… (pick or type)`}
+                                            onKeyDown={(e) => { if (e.key === 'Enter') handleAssignCategory(group.ids, e.currentTarget.value, group.desc); }}
+                                            onChange={(e) => { const v = e.currentTarget.value; if (pickerOptions.includes(v)) handleAssignCategory(group.ids, v, group.desc); }}
+                                            className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-4 py-2 text-sm text-white focus:ring-1 focus:ring-primary focus:border-primary transition-all"
+                                        />
+                                        <div className="absolute right-3 top-2.5 text-[10px] text-zinc-600 font-bold uppercase pointer-events-none">Pick / Enter</div>
+                                    </>
                                 )}
                             </div>
                         </div>
                     ))}
+                {/* Shared suggestions for the L2/L3 combobox */}
+                <datalist id="dd-cat-options">
+                    {pickerOptions.map((opt) => (<option key={opt} value={opt} />))}
+                </datalist>
 
                 {pendingItems.length > RENDER_CAP && (
                     <div className="col-span-full py-4 text-center text-zinc-500 text-sm">
