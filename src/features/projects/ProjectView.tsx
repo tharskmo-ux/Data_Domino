@@ -355,7 +355,12 @@ const ProjectView: React.FC = () => {
                     // CRITICAL-02: Only protect 'raw' if we already have a larger dataset 
                     // (e.g. from Auto-Restore or active work). Metadata must ALWAYS sync.
                     const knownRowCount = normalized.rowCount || 0;
-                    const hasFullData = prev.raw && prev.raw.length > 0 && (knownRowCount === 0 || prev.raw.length >= knownRowCount);
+                    const previewSize = (normalized.rawGrid?.length) || 0;
+                    // Treat in-memory data as "full" if it meets the known count OR is simply
+                    // larger than the 100-row Firestore preview. A stale/higher persisted rowCount
+                    // (e.g. after normalization merges rows) must NOT trigger a clobber.
+                    const hasFullData = prev.raw && prev.raw.length > 0 &&
+                        (knownRowCount === 0 || prev.raw.length >= knownRowCount || prev.raw.length > previewSize);
 
                     if (hasFullData) {
                         console.log('[ProjectView] onSnapshot: updating metadata only (raw data preserved)');
@@ -371,8 +376,9 @@ const ProjectView: React.FC = () => {
                         };
                     }
 
-                    // Fallback: Populate raw from Firestore preview (rawGrid) if we don't have full data yet.
-                    const fallbackRaw = normalized.rawGrid && normalized.rawGrid.length > 0 ? normalized.rawGrid : prev.raw;
+                    // Populate raw from the Firestore preview ONLY if it is larger than what we
+                    // already hold — the 100-row preview must never overwrite a bigger dataset.
+                    const fallbackRaw = (normalized.rawGrid && normalized.rawGrid.length > prev.raw.length) ? normalized.rawGrid : prev.raw;
                     console.log('[ProjectView] onSnapshot: restoring metadata and raw preview (', fallbackRaw.length, 'rows)');
 
                     return {
