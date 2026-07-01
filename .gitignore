@@ -28,3 +28,6 @@ tsc_*.txt
 *.njsproj
 *.sln
 *.sw?
+
+# Firebase deploy cache
+.firebase/
