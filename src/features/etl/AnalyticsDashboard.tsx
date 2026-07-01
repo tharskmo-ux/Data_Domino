@@ -45,6 +45,7 @@ import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
 import { db, storage } from '../../lib/firebase';
 import { getAutoMappings } from '../../utils/columnDetection';
+import { computeConservativeSavingsFromMappings } from '../../utils/savings';
 import { getAIInsights } from '../../services/aiService';
 import type { AIResponse } from '../../services/aiService';
 
@@ -684,8 +685,14 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
             ? totalSpend * 0.12 // Force realistic 12% if saved data is suspiciously equal-to-spend
             : restoredRaw;
 
+        // Conservative, defensible savings — the SAME shared calc the Excel report uses,
+        // so the headline number matches the report. The 5-lever totalIdentifiedSavings is
+        // kept only as an INDICATIVE (softer, requires-validation) figure.
+        const conservative = computeConservativeSavingsFromMappings(filteredRows, mappings);
+        const indicativeSavings = Math.min(totalIdentifiedSavings, totalSpend);
+
         let identifiedSavings = !isSyntheticFallback
-            ? totalIdentifiedSavings
+            ? conservative.firmSaving
             : (validatedRestoredSavings || projectStats?.savingsPotential || 0);
 
         // GLOBAL SAFETY CAP: Ensure total savings never exceeds addressable spend
@@ -1301,6 +1308,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                 .slice(0, 5),
             categoryData: hasLiveRows ? categoryData : (restoredAnalysis?.topCategoryData ?? []),
             identifiedSavings,
+            indicativeSavings,
             isSyntheticFallback,
             quickWinSavings: (effectiveBreakdown.priceArbitrage ?? (effectiveBreakdown as any).priceVariance ?? 0)
                 + (effectiveBreakdown.paymentTerms ?? 0),
@@ -1709,7 +1717,13 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                             </span>
                                         </div>
 
-                                        <h2 className="text-xl font-bold text-zinc-400 mb-2">Total Potential Savings Identified</h2>
+                                        <h2 className="text-xl font-bold text-zinc-400 mb-1">Defensible Savings Identified</h2>
+                                        <p className="text-[11px] text-zinc-500 mb-2">
+                                            Firm method: multi-vendor rate harmonisation (single-UOM, ex-fuel) + freight — matches the Excel report.
+                                            {dynamicStats.indicativeSavings > dynamicStats.identifiedSavings && (
+                                                <> Wider indicative opportunity: <span className="text-zinc-400 font-semibold">{formatCurrency(dynamicStats.indicativeSavings)}</span> (requires validation).</>
+                                            )}
+                                        </p>
                                         <div className="flex items-baseline gap-4 mb-4 relative group/savings">
                                             <div className="relative">
                                                 <h1 className={cn(
@@ -2213,7 +2227,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                                     <span className="bg-emerald-500/10 text-emerald-500 text-[10px] font-black px-2 py-0.5 rounded-full border border-emerald-500/20 uppercase tracking-widest flex items-center gap-1">
                                                         <ShieldCheck className="w-3 h-3" /> Admin View Active
                                                     </span>
-                                                    <span className="text-zinc-500 text-[10px] font-bold uppercase tracking-widest">• Total Identified Opportunity: {formatCurrency(dynamicStats.identifiedSavings)}</span>
+                                                    <span className="text-zinc-500 text-[10px] font-bold uppercase tracking-widest">• Indicative Opportunity: {formatCurrency(dynamicStats.indicativeSavings)}</span>
                                                 </div>
                                             )}
                                             <h3 className="text-2xl font-bold text-white">Savings & ROI Analysis</h3>
@@ -2255,16 +2269,16 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                         !checkAccess('savings_roi') && "blur-xl pointer-events-none select-none opacity-50"
                                     )}>
                                         <div className="flex items-center gap-2 mb-4">
-                                            <span className="text-[10px] font-black text-primary uppercase tracking-widest block">Total Potential ROI</span>
-                                            {dynamicStats.isSyntheticFallback && (
-                                                <span className="text-[9px] font-black bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2 py-0.5 rounded-full uppercase tracking-widest">Estimated</span>
-                                            )}
+                                            <span className="text-[10px] font-black text-primary uppercase tracking-widest block">Indicative Opportunity</span>
+                                            <span className="text-[9px] font-black bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2 py-0.5 rounded-full uppercase tracking-widest">
+                                                {dynamicStats.isSyntheticFallback ? 'Estimated' : 'Needs validation'}
+                                            </span>
                                         </div>
-                                        <div className="text-4xl font-black text-white mb-2">{formatCurrency(dynamicStats.identifiedSavings)}</div>
+                                        <div className="text-4xl font-black text-white mb-2">{formatCurrency(dynamicStats.indicativeSavings)}</div>
                                         <p className="text-xs text-zinc-500">
                                             {dynamicStats.isSyntheticFallback
                                                 ? 'Restored from prior analysis — upload live data for row-level calculations'
-                                                : 'Calculated row-by-row across 5 procurement levers'}
+                                                : `Across 5 levers — indicative upper bound. Firm defensible saving: ${formatCurrency(dynamicStats.identifiedSavings)} (matches the report).`}
                                         </p>
                                     </div>
                                     <div className={cn(

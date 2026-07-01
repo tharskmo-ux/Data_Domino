@@ -19,6 +19,7 @@ import { useAuth } from '../auth/AuthContext';
 import HeaderRowSelector from '../etl/HeaderRowSelector';
 import * as XLSX from 'xlsx';
 import { normalizeWorksheet, stitchTransactions, normalizeDataKeys, cleanValue, filterNoise, detectCurrency, EXCHANGE_RATES } from '../../lib/dataExtraction';
+import { computeConservativeSavingsFromMappings } from '../../utils/savings';
 import { ref, uploadBytes, getDownloadURL, uploadString } from 'firebase/storage';
 import {
     collection,
@@ -1022,6 +1023,11 @@ const ProjectView: React.FC = () => {
                 // Global safety cap: total savings can never exceed total spend
                 totalIdentifiedSavingsSave = Math.floor(Math.min(totalIdentifiedSavingsSave, totalSpendVal));
 
+                // Firm, defensible saving (same shared calc as the Excel report + dashboard headline).
+                // Persisted as identifiedSavings so a reopened project shows the SAME number.
+                const conservativeSave = computeConservativeSavingsFromMappings(updatedData, projectData.mappings || {});
+                const firmSavingSave = Math.floor(Math.min(conservativeSave.firmSaving, totalSpendVal));
+
                 const contractedPctSave = totalSpendVal > 0 ? (contractedSpendSave / totalSpendVal) * 100 : 0;
                 const ptRiskPctSave = totalSpendVal > 0 ? (ptRiskSpendSave / totalSpendVal) * 100 : 0;
 
@@ -1181,49 +1187,9 @@ const ProjectView: React.FC = () => {
                     // ── Intelligent Lever Probabilities (Signal-Driven) ───────────────
                     // Probabilities are derived from dataset characteristics to provide 
                     // a realistic "Risk-Adjusted" savings potential.
-                    const clampProb = (v: number) => Math.round(Math.max(5, Math.min(98, v)));
-
-                    const multiSrcItemCount = Object.values(gItemStats).filter(s => s.supplierCount > 1).length;
-                    const buDiversity = Object.keys(buSpendSave).length;
-                    const directPct = updatedData.filter(r => /material|factory|production|logistics|packaging|raw/i.test(String(r[projectData.mappings['category_l1'] || '']))).length / (updatedData.length || 1) * 100;
-
-                    const probs = {
-                        priceArbitrage: clampProb(
-                            55
-                            + (priceArbitrageSave > 0 ? 18 : -15)
-                            + (multiSrcItemCount > 20 ? 12 : multiSrcItemCount > 5 ? 5 : 0)
-                            + (unitPriceColSave ? 5 : -10)
-                        ),
-                        paymentTerms: clampProb(
-                            45
-                            + (ptRiskPctSave > 30 ? 25 : ptRiskPctSave > 10 ? 10 : 0)
-                            + (totalSpendVal > 5_000_000 ? 8 : 0)
-                        ),
-                        volumeDiscount: clampProb(
-                            50
-                            + (gVolDiscSuppliers.size > 10 ? 15 : gVolDiscSuppliers.size > 3 ? 6 : 0)
-                            + (buDiversity >= 3 ? 10 : 0)
-                        ),
-                        singleSource: clampProb(
-                            35
-                            + (singleSourcingPctSave > 40 ? 15 : singleSourcingPctSave > 20 ? 8 : 0)
-                            + (directPct > 50 ? -10 : 5) // harder to shift direct materials
-                        ),
-                        tailSpend: clampProb(
-                            40
-                            + (tailSpendPctSave > 20 ? 20 : tailSpendPctSave > 10 ? 10 : 0)
-                            + (gTailSuppliersSet.size > 20 ? 12 : 5)
-                        )
-                    };
-
-                    // savingsPotentialMin = risk-adjusted (gross × lever probability)
-                    // We use these calculated probabilities to derive the expected value.
-                    const riskAdjustedTotal =
-                        (priceArbitrageSave * probs.priceArbitrage / 100) +
-                        (paymentTermsSave * probs.paymentTerms / 100) +
-                        (volumeDiscountSave * probs.volumeDiscount / 100) +
-                        (singleSourceSave * probs.singleSource / 100) +
-                        (tailSpendSave * probs.tailSpend / 100);
+                    // NOTE: identifiedSavings/savingsPotentialMin are the FIRM defensible number
+                    // (firmSavingSave, computed above). The old probability-weighted risk-adjusted
+                    // total was removed — the 5-lever gross is kept as savingsPotentialMax (indicative).
 
                     await updateDoc(projectsDocRef, {
                         status: 'categorization_complete',
@@ -1238,10 +1204,10 @@ const ProjectView: React.FC = () => {
                             topVendorSpend,
                             duplicateCount,
                             duplicateValue,
-                            // Savings — v2 pricing levers
-                            identifiedSavings: totalIdentifiedSavingsSave,        // gross total
-                            savingsPotentialMin: Math.min(riskAdjustedTotal, totalSpendVal),
-                            savingsPotentialMax: totalIdentifiedSavingsSave,
+                            // Savings — firm headline (matches report) + indicative upper bound
+                            identifiedSavings: firmSavingSave,                    // firm, defensible (= report)
+                            savingsPotentialMin: firmSavingSave,
+                            savingsPotentialMax: totalIdentifiedSavingsSave,      // indicative 5-lever upper bound
                             // Savings breakdown by lever (for Quick-Win / Strategic split on restore)
                             savingsBreakdown: {
                                 priceArbitrage: priceArbitrageSave,
