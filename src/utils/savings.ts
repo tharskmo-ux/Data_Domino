@@ -26,6 +26,9 @@ export interface SavingsLever {
     key: string;
     label: string;
     tier: 'firm' | 'indicative';
+    // Effort to realise: 'quickwin' = fast commercial term change (no re-sourcing);
+    // 'strategic' = needs price negotiation, an RFQ, or a supplier programme.
+    group: 'quickwin' | 'strategic';
     basisSpend: number;   // the spend the rate is applied to
     ratePct: number;      // e.g. 3 for 3% (0 for the computed rate-harmonisation gap)
     saving: number;
@@ -142,32 +145,32 @@ export function computeSavingsModel(
 
     const levers: SavingsLever[] = [
         {
-            key: 'rateHarmonisation', label: 'Rate harmonisation', tier: 'firm',
+            key: 'rateHarmonisation', label: 'Rate harmonisation', tier: 'firm', group: 'strategic',
             basisSpend: cons.rateHarmonisationSpend, ratePct: 0, saving: cons.rateHarmonisationSaving,
             how: `On ${inrShort(cons.rateHarmonisationSpend)} of items bought from 2+ vendors in the same unit (fuel & agri excluded), move volume to each item's lowest in-year rate: Σ (price paid − best rate) × qty = ${inrShort(cons.rateHarmonisationSaving)}.`,
         },
         {
-            key: 'freight', label: 'Freight billed separately', tier: 'firm',
+            key: 'freight', label: 'Freight billed separately', tier: 'firm', group: 'quickwin',
             basisSpend: cons.totalFreight, ratePct: Math.round(freightRate * 100), saving: cons.freightSaving,
             how: `${inrShort(cons.totalFreight)} of freight is invoiced on separate lines; delivered (FOR) pricing absorbs about ${Math.round(freightRate * 100)}% → ${inrShort(cons.freightSaving)}.`,
         },
         {
-            key: 'alternateVendor', label: 'Alternate vendor (RFQ)', tier: 'indicative',
+            key: 'alternateVendor', label: 'Alternate vendor (RFQ)', tier: 'indicative', group: 'strategic',
             basisSpend: altSpend, ratePct: 5, saving: altSpend * 0.05,
             how: `5% competitive-tension benefit on ${inrShort(altSpend)} of spend on items that currently have only one supplier (qualify a 2nd source) = ${inrShort(altSpend * 0.05)}.`,
         },
         {
-            key: 'volumeCommitment', label: 'Volume commitment', tier: 'indicative',
+            key: 'volumeCommitment', label: 'Volume commitment', tier: 'indicative', group: 'strategic',
             basisSpend: volSpend, ratePct: 3, saving: volSpend * 0.03,
             how: `3% volume-commitment discount on ${inrShort(volSpend)} placed with suppliers you order from often and at scale (≥ ₹10 L and ≥ 12 orders) = ${inrShort(volSpend * 0.03)}.`,
         },
         {
-            key: 'tailConsolidation', label: 'Tail consolidation', tier: 'indicative',
+            key: 'tailConsolidation', label: 'Tail consolidation', tier: 'indicative', group: 'strategic',
             basisSpend: tailSpend, ratePct: 6, saving: tailSpend * 0.06,
             how: `6% process + leverage saving on ${inrShort(tailSpend)} spread across many small suppliers (< ₹2 L/yr each) by consolidating onto preferred vendors = ${inrShort(tailSpend * 0.06)}.`,
         },
         {
-            key: 'paymentTerms', label: 'Payment terms', tier: 'indicative',
+            key: 'paymentTerms', label: 'Payment terms', tier: 'indicative', group: 'quickwin',
             basisSpend: ptSpend, ratePct: 2, saving: ptSpend * 0.02,
             how: `~2% cost-of-capital saving on ${inrShort(ptSpend)} paid on cash / advance / short-net terms by moving to net-30+ = ${inrShort(ptSpend * 0.02)}.`,
         },

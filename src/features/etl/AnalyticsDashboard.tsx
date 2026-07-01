@@ -111,6 +111,8 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
     const [dateRange, setDateRange] = useState<'ALL' | '12M' | '6M' | 'YTD'>('ALL');
     const [vendorSearch, setVendorSearch] = useState('');
     const [activeSpendType, setActiveSpendType] = useState<'Direct' | 'Indirect' | null>(null);
+    // Savings roadmap filter: which card is selected ('all' = show every lever).
+    const [savingsFilter, setSavingsFilter] = useState<'all' | 'indicative' | 'quickwin' | 'strategic'>('all');
     const [hoveredSpendType, setHoveredSpendType] = useState<'Direct' | 'Indirect' | null>(null);
     const [drilldownKpi, setDrilldownKpi] = useState<any | null>(null);
     const [isFilterOpen, setIsFilterOpen] = useState(false);
@@ -690,7 +692,6 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
         // and every figure explains itself.
         const conservative = computeConservativeSavingsFromMappings(filteredRows, mappings);
         const savingsModel = computeSavingsModel(filteredRows, mappings);
-        const _leverByKey = Object.fromEntries(savingsModel.levers.map(l => [l.key, l]));
         const indicativeSavings = savingsModel.indicativeSaving;
 
         let identifiedSavings = !isSyntheticFallback
@@ -851,6 +852,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
             .map(l => ({
                 id: l.key,
                 tier: l.tier,
+                group: l.group,
                 label: l.label,
                 value: l.saving,
                 basisSpend: l.basisSpend,
@@ -1298,9 +1300,11 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
             identifiedSavings,
             indicativeSavings,
             isSyntheticFallback,
-            // From the shared model so these reconcile with the roadmap cards + report.
-            quickWinSavings: (_leverByKey['alternateVendor']?.saving ?? 0) + (_leverByKey['paymentTerms']?.saving ?? 0),
-            strategicSavings: (_leverByKey['volumeCommitment']?.saving ?? 0) + (_leverByKey['tailConsolidation']?.saving ?? 0),
+            // Grouped by EFFORT (from the shared model), not confidence. Quick wins = fast
+            // commercial changes only (freight terms + payment terms); pricing/sourcing plays
+            // (rate harmonisation, alternate vendor, volume, tail) are strategic.
+            quickWinSavings: savingsModel.levers.filter(l => l.group === 'quickwin').reduce((a, l) => a + l.saving, 0),
+            strategicSavings: savingsModel.levers.filter(l => l.group === 'strategic').reduce((a, l) => a + l.saving, 0),
             savingsLevers,
             leverProbabilities,
             riskAdjustedSavings,
@@ -2249,10 +2253,15 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                             </div>
                                         </div>
                                     )}
-                                    <div className={cn(
-                                        "bg-primary/5 border border-primary/20 rounded-3xl p-8 border-b-4 border-b-primary transition-all",
-                                        !checkAccess('savings_roi') && "blur-xl pointer-events-none select-none opacity-50"
-                                    )}>
+                                    <button
+                                        type="button"
+                                        onClick={() => setSavingsFilter(savingsFilter === 'indicative' ? 'all' : 'indicative')}
+                                        className={cn(
+                                            "text-left bg-primary/5 border border-primary/20 rounded-3xl p-8 border-b-4 border-b-primary transition-all hover:border-primary/50",
+                                            savingsFilter === 'indicative' && "ring-2 ring-primary",
+                                            !checkAccess('savings_roi') && "blur-xl pointer-events-none select-none opacity-50"
+                                        )}
+                                    >
                                         <div className="flex items-center gap-2 mb-4">
                                             <span className="text-[10px] font-black text-primary uppercase tracking-widest block">Indicative Opportunity</span>
                                             <span className="text-[9px] font-black bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2 py-0.5 rounded-full uppercase tracking-widest">
@@ -2263,35 +2272,66 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                         <p className="text-xs text-zinc-500">
                                             {dynamicStats.isSyntheticFallback
                                                 ? 'Restored from prior analysis — upload live data for row-level calculations'
-                                                : `Across 5 levers — indicative upper bound. Firm defensible saving: ${formatCurrency(dynamicStats.identifiedSavings)} (matches the report).`}
+                                                : `Indicative upper bound. Firm defensible saving: ${formatCurrency(dynamicStats.identifiedSavings)} (matches the report). Tap to filter.`}
                                         </p>
-                                    </div>
-                                    <div className={cn(
-                                        "bg-emerald-500/5 border border-emerald-500/20 rounded-3xl p-8 border-b-4 border-b-emerald-500 transition-all",
-                                        !checkAccess('savings_roi') && "blur-xl pointer-events-none select-none opacity-50"
-                                    )}>
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => setSavingsFilter(savingsFilter === 'quickwin' ? 'all' : 'quickwin')}
+                                        className={cn(
+                                            "text-left bg-emerald-500/5 border border-emerald-500/20 rounded-3xl p-8 border-b-4 border-b-emerald-500 transition-all hover:border-emerald-500/50",
+                                            savingsFilter === 'quickwin' && "ring-2 ring-emerald-500",
+                                            !checkAccess('savings_roi') && "blur-xl pointer-events-none select-none opacity-50"
+                                        )}
+                                    >
                                         <span className="text-[10px] font-black text-emerald-500 uppercase tracking-widest mb-4 block">Quick-Win Savings</span>
                                         <div className="text-4xl font-black text-white mb-2">{formatCurrency(dynamicStats.quickWinSavings)}</div>
-                                        <p className="text-xs text-zinc-500">Alternate vendor (RFQ) &amp; payment terms — indicative</p>
-                                    </div>
-                                    <div className={cn(
-                                        "bg-amber-500/5 border border-amber-500/20 rounded-3xl p-8 border-b-4 border-b-amber-500 transition-all",
-                                        !checkAccess('savings_roi') && "blur-xl pointer-events-none select-none opacity-50"
-                                    )}>
+                                        <p className="text-xs text-zinc-500">Fast commercial wins — freight (delivered pricing) &amp; payment terms. No re-sourcing. Tap to filter.</p>
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => setSavingsFilter(savingsFilter === 'strategic' ? 'all' : 'strategic')}
+                                        className={cn(
+                                            "text-left bg-amber-500/5 border border-amber-500/20 rounded-3xl p-8 border-b-4 border-b-amber-500 transition-all hover:border-amber-500/50",
+                                            savingsFilter === 'strategic' && "ring-2 ring-amber-500",
+                                            !checkAccess('savings_roi') && "blur-xl pointer-events-none select-none opacity-50"
+                                        )}
+                                    >
                                         <span className="text-[10px] font-black text-amber-500 uppercase tracking-widest mb-4 block">Strategic Pipeline</span>
                                         <div className="text-4xl font-black text-white mb-2">{formatCurrency(dynamicStats.strategicSavings)}</div>
-                                        <p className="text-xs text-zinc-500">Volume commitment &amp; tail consolidation — indicative</p>
-                                    </div>
+                                        <p className="text-xs text-zinc-500">Needs negotiation / RFQ — rate harmonisation, alternate vendor, volume &amp; tail. Tap to filter.</p>
+                                    </button>
                                 </div>
 
                                 <div className="space-y-6">
                                     <div className="flex items-center justify-between">
                                         <h4 className="text-lg font-bold text-white uppercase tracking-tighter">Top Savings Opportunities</h4>
-                                        <span className="text-zinc-500 text-[10px] font-bold uppercase tracking-widest">Firm saving first, then indicative levers</span>
+                                        <div className="flex items-center gap-3">
+                                            <span className="text-zinc-500 text-[10px] font-bold uppercase tracking-widest">
+                                                {savingsFilter === 'all' ? 'Firm first, then indicative'
+                                                    : savingsFilter === 'indicative' ? 'Filtered: indicative levers'
+                                                    : savingsFilter === 'quickwin' ? 'Filtered: quick-win levers'
+                                                    : 'Filtered: strategic levers'}
+                                            </span>
+                                            {savingsFilter !== 'all' && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setSavingsFilter('all')}
+                                                    className="text-[10px] font-black uppercase tracking-widest px-3 py-1 rounded-full border border-zinc-700 text-zinc-300 hover:bg-zinc-800 transition-all"
+                                                >
+                                                    Reset filter
+                                                </button>
+                                            )}
+                                        </div>
                                     </div>
 
                                     <div className="grid grid-cols-1 gap-4">
-                                        {dynamicStats.opportunityRanking.map((opp: any, idx: number) => (
+                                        {dynamicStats.opportunityRanking
+                                            .filter((opp: any) =>
+                                                savingsFilter === 'all' ? true
+                                                    : savingsFilter === 'indicative' ? opp.tier === 'indicative'
+                                                    : opp.group === savingsFilter)
+                                            .map((opp: any, idx: number) => (
                                             <div
                                                 key={opp.id}
                                                 className={cn(
@@ -2331,6 +2371,14 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                                 </div>
                                             </div>
                                         ))}
+                                        {dynamicStats.opportunityRanking.filter((opp: any) =>
+                                            savingsFilter === 'all' ? true
+                                                : savingsFilter === 'indicative' ? opp.tier === 'indicative'
+                                                : opp.group === savingsFilter).length === 0 && (
+                                            <div className="text-sm text-zinc-500 py-8 text-center border border-dashed border-zinc-800 rounded-2xl">
+                                                No levers in this group for this dataset. <button type="button" onClick={() => setSavingsFilter('all')} className="text-primary font-bold underline ml-1">Show all</button>
+                                            </div>
+                                        )}
                                     </div>
                                 </div>
 
