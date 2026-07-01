@@ -122,9 +122,11 @@ const CategoryMapper: React.FC<CategoryMapperProps> = ({ data, mappings, onCompl
         if (!categoryCol) return [];
 
         // Identify columns for all levels for display purposes
+        // Read L1/L2/L3 from the SAME keys the assignment writes to (see categoryCol),
+        // so manually-assigned L2/L3 values actually display instead of staying blank.
         const colL1 = mappings['category_l1'] || mappings['category'] || 'category';
-        const colL2 = mappings['category_l2'];
-        const colL3 = mappings['category_l3'];
+        const colL2 = mappings['category_l2'] || 'category_l2';
+        const colL3 = mappings['category_l3'] || 'category_l3';
 
         // Group by description to allow bulk updates
         const groups: Record<string, { count: number, ids: number[], parent?: string, l1?: string, l2?: string, l3?: string }> = {};
@@ -395,14 +397,9 @@ const CategoryMapper: React.FC<CategoryMapperProps> = ({ data, mappings, onCompl
 
             {/* Classification Grid */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                <AnimatePresence>
                     {pendingItems.slice(0, RENDER_CAP).map((group, idx) => (
-                        <motion.div
+                        <div
                             key={group.desc + idx}
-                            initial={{ opacity: 0, scale: 0.95 }}
-                            animate={{ opacity: 1, scale: 1 }}
-                            exit={{ opacity: 0, scale: 0.95 }}
-                            layout
                             className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 hover:border-zinc-700 transition-all group"
                         >
                             <div className="flex justify-between items-start mb-4">
@@ -457,9 +454,8 @@ const CategoryMapper: React.FC<CategoryMapperProps> = ({ data, mappings, onCompl
                                     </div>
                                 )}
                             </div>
-                        </motion.div>
+                        </div>
                     ))}
-                </AnimatePresence>
 
                 {pendingItems.length > RENDER_CAP && (
                     <div className="col-span-full py-4 text-center text-zinc-500 text-sm">
