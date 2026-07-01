@@ -45,7 +45,6 @@ import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
 import { db, storage } from '../../lib/firebase';
 import { getAutoMappings } from '../../utils/columnDetection';
-import { computeConservativeSavingsFromMappings } from '../../utils/savings';
 import { getAIInsights } from '../../services/aiService';
 import type { AIResponse } from '../../services/aiService';
 
@@ -356,12 +355,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
 
 
         // 1. Fiscal Year & Time Period Analysis
-        // Base the reference date on the LATEST date present in the data, not the wall
-        // clock. A historical upload (e.g. FY 2025-26) would otherwise show ₹0 for the
-        // "current" FY / YTD whenever today falls in a later fiscal year.
-        const _fyTimestamps = dateCol ? filteredRows.map(r => parseDateValue(r[dateCol])?.getTime() || 0) : [];
-        const _maxTs = _fyTimestamps.reduce((m, t) => (t > m ? t : m), 0);
-        const now = _maxTs > 0 ? new Date(_maxTs) : new Date();
+        const now = new Date();
         const getFY = (date: Date) => {
             const y = date.getFullYear();
             return date.getMonth() >= 3 ? y : y - 1; // April start
@@ -690,21 +684,8 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
             ? totalSpend * 0.12 // Force realistic 12% if saved data is suspiciously equal-to-spend
             : restoredRaw;
 
-        // ── Conservative, defensible savings (single source of truth shared with the
-        //    Excel report). This is the FIRM headline number: multi-vendor rate
-        //    harmonisation on single-UOM, ex-fuel items + freight. The 5-lever
-        //    `totalIdentifiedSavings` is kept only as an INDICATIVE (softer) figure.
-        const conservative = computeConservativeSavingsFromMappings(filteredRows, mappings);
-        // 5-lever upper bound. When rows aren't loaded (restored state) it would collapse
-        // to 0, so fall back to the persisted indicative figure instead of showing Rs 0.
-        const restoredIndicative = restoredStats?.savingsPotentialMax ?? restoredAnalysis?.savingsPotentialMax
-            ?? restoredStats?.identifiedSavings ?? restoredAnalysis?.identifiedSavings ?? 0;
-        const indicativeSavings = isSyntheticFallback
-            ? (totalSpend > 0 ? Math.min(restoredIndicative, totalSpend) : restoredIndicative)
-            : Math.min(totalIdentifiedSavings, totalSpend);
-
         let identifiedSavings = !isSyntheticFallback
-            ? conservative.firmSaving
+            ? totalIdentifiedSavings
             : (validatedRestoredSavings || projectStats?.savingsPotential || 0);
 
         // GLOBAL SAFETY CAP: Ensure total savings never exceeds addressable spend
@@ -917,49 +898,6 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
             .sort((a, b) => b.expectedValue - a.expectedValue) // rank by risk-adjusted value
             .slice(0, 5); // show all 5 levers (filtered to those with savings > 0)
 
-        // ── Execution Roadmap ─────────────────────────────────────────────────────
-        // A phased action plan derived directly from opportunityRanking. Quick-win
-        // pricing levers are sequenced first (0–90 days), strategic sourcing next,
-        // structural tail consolidation last. Each phase aggregates the target saving,
-        // the spend-weighted blended probability, and the concrete next steps of the
-        // levers that fall within it. Empty when no live rows are loaded (savings are
-        // all 0 → opportunityRanking is empty) — the savings tab surfaces a reload
-        // prompt in that case instead of rendering a blank panel.
-        // DEFENSIBLE first, then indicative. Phase 1 = the firm conservative levers
-        // (rate harmonisation + freight) that back the headline number; Phases 2–3 =
-        // the softer 5-lever opportunities, tagged "needs validation" so they read as
-        // estimates, not commitments. (Indicative price-arbitrage is intentionally NOT
-        // listed separately — Phase 1 rate harmonisation is the defensible version of
-        // that same pricing lever, so listing both would double-count it.)
-        const ranById: Record<string, any> = {};
-        for (const o of opportunityRanking) ranById[o.id] = o;
-        const indAction = (id: string) => {
-            const o = ranById[id];
-            return o && o.value > 0
-                ? { id: o.id, label: o.label, value: o.value, recommendation: o.recommendation, tier: 'indicative' as const }
-                : null;
-        };
-        const roadmapDraft: { id: string; name: string; horizon: string; color: string; tier: 'firm' | 'indicative'; actions: any[] }[] = [
-            {
-                id: 'phase-1', name: 'Do Now — Quick Wins', horizon: '0–90 days', color: '#10b981', tier: 'firm',
-                actions: [
-                    conservative.rateHarmonisationSaving > 0 ? { id: 'rateHarm', label: 'Rate harmonisation (multi-vendor, same UOM)', value: conservative.rateHarmonisationSaving, recommendation: 'Move volume to the best in-year rate for items bought from two or more vendors at the same unit of measure.', tier: 'firm' as const } : null,
-                    conservative.freightSaving > 0 ? { id: 'freight', label: 'Freight renegotiation', value: conservative.freightSaving, recommendation: 'Negotiate delivered (FOR) pricing so freight is built into the unit rate.', tier: 'firm' as const } : null,
-                ].filter(Boolean),
-            },
-            {
-                id: 'phase-2', name: 'Next — Strategic Sourcing', horizon: '3–6 months', color: '#14b8a6', tier: 'indicative',
-                actions: ['singleSource', 'volumeDiscount', 'paymentTerms'].map(indAction).filter(Boolean),
-            },
-            {
-                id: 'phase-3', name: 'Later — Structural Consolidation', horizon: '6–12 months', color: '#f59e0b', tier: 'indicative',
-                actions: ['tailSpend'].map(indAction).filter(Boolean),
-            },
-        ];
-        const executionRoadmap = roadmapDraft
-            .map(phase => ({ ...phase, targetSaving: phase.actions.reduce((acc: number, a: any) => acc + a.value, 0) }))
-            .filter(phase => phase.actions.length > 0);
-
         // ── DATA-DRIVEN SAVINGS LEVERS ────────────────────────────────────────────
         // FIX 7+8+9: Probabilities are fully derived from actual dataset signals.
         // Each lever starts at a neutral base and is pushed up/down by measured
@@ -1147,8 +1085,6 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
             unverifiedSpend: totalSpend - stats.contractedSpend,
             ptRiskSpend: stats.ptRiskSpend,
             opportunityRanking,
-            executionRoadmap,
-            hasLiveRows,
             buData: buSummary.slice(0, 5),
             locData: locSummary.slice(0, 5),
             buSummary,
@@ -1365,9 +1301,6 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                 .slice(0, 5),
             categoryData: hasLiveRows ? categoryData : (restoredAnalysis?.topCategoryData ?? []),
             identifiedSavings,
-            indicativeSavings,
-            rateHarmonisationSaving: conservative.rateHarmonisationSaving,
-            freightSaving: conservative.freightSaving,
             isSyntheticFallback,
             quickWinSavings: (effectiveBreakdown.priceArbitrage ?? (effectiveBreakdown as any).priceVariance ?? 0)
                 + (effectiveBreakdown.paymentTerms ?? 0),
@@ -1497,34 +1430,6 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
             setIsSharedView(true);
         }
     }, []);
-
-    // Shown in the savings tab's row-level sections (Top Savings Opportunities,
-    // Execution Roadmap) when the full processed dataset isn't in memory. Those
-    // sections are computed purely from live rows, so without them they would
-    // render empty next to restored headline figures. ProjectView's AUTO-RESTORE
-    // effect re-fetches the dataset from Storage automatically, so this is normally
-    // a transient loading state; if it isn't loading, the data failed to restore.
-    const liveDataPrompt = (
-        <div className="bg-zinc-900/40 border border-dashed border-zinc-800 rounded-[2rem] p-10 flex flex-col items-center justify-center text-center gap-4">
-            {isLoading ? (
-                <Loader2 className="h-8 w-8 text-primary animate-spin" />
-            ) : (
-                <div className="w-14 h-14 rounded-2xl bg-zinc-950 border border-zinc-800 flex items-center justify-center">
-                    <Database className="h-6 w-6 text-zinc-500" />
-                </div>
-            )}
-            <div>
-                <h5 className="text-white font-bold mb-1">
-                    {isLoading ? 'Loading full dataset…' : 'Row-level analysis not loaded'}
-                </h5>
-                <p className="text-xs text-zinc-500 max-w-md">
-                    {isLoading
-                        ? 'Fetching the processed transactions to compute your live opportunities and execution roadmap.'
-                        : 'The headline figures above are restored from your last analysis. Reopen this project (or re-run the analysis) to load the full transaction dataset and view live opportunities and the execution roadmap.'}
-                </p>
-            </div>
-        </div>
-    );
 
     return (
         <>
@@ -1804,13 +1709,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                             </span>
                                         </div>
 
-                                        <h2 className="text-xl font-bold text-zinc-400 mb-1">Defensible Savings Identified</h2>
-                                        <p className="text-[11px] text-zinc-500 mb-2">
-                                            Firm method: multi-vendor rate harmonisation (single-UOM, ex-fuel) + freight.
-                                            {dynamicStats.indicativeSavings > dynamicStats.identifiedSavings && (
-                                                <> Wider indicative opportunity incl. softer levers: <span className="text-zinc-400 font-semibold">{formatCurrency(dynamicStats.indicativeSavings)}</span> (requires validation).</>
-                                            )}
-                                        </p>
+                                        <h2 className="text-xl font-bold text-zinc-400 mb-2">Total Potential Savings Identified</h2>
                                         <div className="flex items-baseline gap-4 mb-4 relative group/savings">
                                             <div className="relative">
                                                 <h1 className={cn(
@@ -2314,11 +2213,11 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                                     <span className="bg-emerald-500/10 text-emerald-500 text-[10px] font-black px-2 py-0.5 rounded-full border border-emerald-500/20 uppercase tracking-widest flex items-center gap-1">
                                                         <ShieldCheck className="w-3 h-3" /> Admin View Active
                                                     </span>
-                                                    <span className="text-zinc-500 text-[10px] font-bold uppercase tracking-widest">• Indicative Opportunity: {formatCurrency(dynamicStats.indicativeSavings)}</span>
+                                                    <span className="text-zinc-500 text-[10px] font-bold uppercase tracking-widest">• Total Identified Opportunity: {formatCurrency(dynamicStats.identifiedSavings)}</span>
                                                 </div>
                                             )}
                                             <h3 className="text-2xl font-bold text-white">Savings & ROI Analysis</h3>
-                                            <p className="text-zinc-500 text-sm">Indicative opportunities across 5 levers — requires validation. Firm/defensible figure is {formatCurrency(dynamicStats.identifiedSavings)} (rate harmonisation + freight).</p>
+                                            <p className="text-zinc-500 text-sm">Actionable opportunities to reduce spend</p>
                                         </div>
                                     </div>
                                     <button
@@ -2356,14 +2255,16 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                         !checkAccess('savings_roi') && "blur-xl pointer-events-none select-none opacity-50"
                                     )}>
                                         <div className="flex items-center gap-2 mb-4">
-                                            <span className="text-[10px] font-black text-primary uppercase tracking-widest block">Indicative Opportunity</span>
-                                            <span className="text-[9px] font-black bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2 py-0.5 rounded-full uppercase tracking-widest">{dynamicStats.isSyntheticFallback ? 'Estimated' : 'Requires validation'}</span>
+                                            <span className="text-[10px] font-black text-primary uppercase tracking-widest block">Total Potential ROI</span>
+                                            {dynamicStats.isSyntheticFallback && (
+                                                <span className="text-[9px] font-black bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2 py-0.5 rounded-full uppercase tracking-widest">Estimated</span>
+                                            )}
                                         </div>
-                                        <div className="text-4xl font-black text-white mb-2">{formatCurrency(dynamicStats.indicativeSavings)}</div>
+                                        <div className="text-4xl font-black text-white mb-2">{formatCurrency(dynamicStats.identifiedSavings)}</div>
                                         <p className="text-xs text-zinc-500">
                                             {dynamicStats.isSyntheticFallback
                                                 ? 'Restored from prior analysis — upload live data for row-level calculations'
-                                                : 'Upper-bound across 5 levers. Firm figure (rate harmonisation + freight): ' + formatCurrency(dynamicStats.identifiedSavings)}
+                                                : 'Calculated row-by-row across 5 procurement levers'}
                                         </p>
                                     </div>
                                     <div className={cn(
@@ -2391,14 +2292,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                     </div>
 
                                     <div className="grid grid-cols-1 gap-4">
-                                        {!dynamicStats.hasLiveRows ? (
-                                            liveDataPrompt
-                                        ) : dynamicStats.opportunityRanking.length === 0 ? (
-                                            <div className="bg-zinc-900/40 border border-dashed border-zinc-800 rounded-[2rem] p-10 text-center text-sm text-zinc-500">
-                                                No pricing-lever opportunities were identified in the current dataset.
-                                            </div>
-                                        ) : (
-                                            dynamicStats.opportunityRanking.map((opp: any, idx: number) => (
+                                        {dynamicStats.opportunityRanking.map((opp: any, idx: number) => (
                                             <div
                                                 key={opp.id}
                                                 className={cn(
@@ -2478,8 +2372,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                                     </div>
                                                 </div>
                                             </div>
-                                        ))
-                                        )}
+                                        ))}
                                     </div>
                                 </div>
 
@@ -2528,51 +2421,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ data, mappings,
                                         "bg-zinc-900/40 border border-zinc-900 rounded-[2.5rem] p-8 transition-all duration-1000",
                                         isAdmin ? "opacity-100" : "blur-3xl saturate-0 opacity-20 pointer-events-none select-none group-hover/bottom:blur-xl"
                                     )}>
-                                        <h3 className="text-xl font-bold mb-2 uppercase tracking-widest text-zinc-400">Execution Roadmap</h3>
-                                        <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest mb-8">Sequenced from quick wins to structural change</p>
-                                        {!dynamicStats.hasLiveRows ? (
-                                            liveDataPrompt
-                                        ) : dynamicStats.executionRoadmap.length === 0 ? (
-                                            <div className="text-sm text-zinc-500 py-6">No actionable levers to sequence for the current dataset.</div>
-                                        ) : (
-                                            <div className="space-y-8">
-                                                {dynamicStats.executionRoadmap.map((phase: any) => (
-                                                    <div key={phase.id} className="relative pl-8">
-                                                        <div className="absolute left-[6px] top-2 bottom-0 w-px bg-zinc-800" />
-                                                        <div className="absolute left-0 top-1.5 w-3 h-3 rounded-full border-2" style={{ borderColor: phase.color, backgroundColor: '#09090b' }} />
-                                                        <div className="flex items-start justify-between gap-4 mb-4">
-                                                            <div>
-                                                                <div className="flex items-center gap-3 flex-wrap">
-                                                                    <h4 className="text-white font-bold text-sm">{phase.name}</h4>
-                                                                    <span className="text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full border" style={{ color: phase.color, borderColor: `${phase.color}44`, backgroundColor: `${phase.color}11` }}>{phase.horizon}</span>
-                                                                    {phase.tier === 'firm' ? (
-                                                                        <span className="text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full border border-emerald-500/30 text-emerald-400 bg-emerald-500/10">Solid</span>
-                                                                    ) : (
-                                                                        <span className="text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full border border-amber-500/30 text-amber-400 bg-amber-500/10">Needs validation</span>
-                                                                    )}
-                                                                </div>
-                                                                <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest mt-1">{phase.tier === 'firm' ? 'Defensible — backs the headline savings' : 'Indicative estimate — confirm before committing'}</p>
-                                                            </div>
-                                                            <div className="text-right shrink-0">
-                                                                <div className="text-lg font-black text-primary">{formatCurrency(phase.targetSaving)}</div>
-                                                                <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-widest">{phase.tier === 'firm' ? 'Firm' : 'Indicative'}</div>
-                                                            </div>
-                                                        </div>
-                                                        <div className="space-y-2">
-                                                            {phase.actions.map((a: any) => (
-                                                                <div key={a.id} className="bg-zinc-950/50 border border-zinc-800/50 rounded-2xl p-4">
-                                                                    <div className="flex items-center justify-between gap-3 mb-1">
-                                                                        <span className="text-xs font-bold text-white">{a.label}</span>
-                                                                        <span className="text-xs font-black text-primary shrink-0">{formatCurrency(a.value)}</span>
-                                                                    </div>
-                                                                    <p className="text-[10px] text-zinc-500 leading-relaxed">{a.recommendation}</p>
-                                                                </div>
-                                                            ))}
-                                                        </div>
-                                                    </div>
-                                                ))}
-                                            </div>
-                                        )}
+                                        <h3 className="text-xl font-bold">Execution Roadmap</h3>
                                     </div>
                                 </div>
 

@@ -1,14 +1,10 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo } from 'react';
 import { Check, AlertTriangle, ArrowRight, Search, Tag, Upload, Sparkles } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { cn } from '../../lib/utils';
 import { categorize } from '../../utils/categorization/categorize';
 import { getClassifier } from '../../utils/categorization/llm';
 import { resolveSubLevels } from '../../utils/categorization/hierarchy';
-import { TAXONOMY } from '../../utils/categorization/taxonomy';
-import { loadUserRules, saveUserRule, applyUserRules, type UserRule } from '../../utils/categorization/userRules';
-import { fetchUserRules, persistUserRulesToCloud } from '../../services/userRulesStore';
-import { useEffectiveUid } from '../../hooks/useEffectiveUid';
 
 // Cap how many item cards render at once. With 18k rows there can be thousands of
 // distinct-description groups; rendering them all (each an animated card) freezes
@@ -37,17 +33,6 @@ const CategoryMapper: React.FC<CategoryMapperProps> = ({ data, mappings, onCompl
     const [applyToSimilar, setApplyToSimilar] = useState(true);
     const [customTaxonomy, setCustomTaxonomy] = useState<any[] | null>(null);
 
-    // ── User-taught rules (Part B): persisted per user, applied on future files ──
-    const scope = useEffectiveUid() || 'default';
-    const [rememberRule, setRememberRule] = useState(true);
-    const [userRules, setUserRules] = useState<UserRule[]>([]);
-    useEffect(() => {
-        setUserRules(loadUserRules(scope));            // instant, from local cache
-        let alive = true;
-        fetchUserRules(scope).then((r) => { if (alive) setUserRules(r); }); // then sync from Firestore
-        return () => { alive = false; };
-    }, [scope]);
-
     // Dynamic Column Selection based on Active Level
     // If specific level mapping exists, use it.
     // For L1, fallback to generic 'category'.
@@ -59,24 +44,6 @@ const CategoryMapper: React.FC<CategoryMapperProps> = ({ data, mappings, onCompl
         activeLevel === 'l3' ? mappings['category_l2'] : undefined;
 
     const descriptionCol = mappings['item_description'] || mappings['description'] || mappings['item'] || mappings['material']; // Fallback for context
-
-    // Options for the category picker at the active level. L1 = fixed taxonomy (or an
-    // uploaded custom one); L2/L3 = distinct values already present (open-ended, new allowed).
-    const pickerOptions = useMemo(() => {
-        if (activeLevel === 'l1') {
-            if (customTaxonomy && customTaxonomy.length) {
-                const names = customTaxonomy.map((t: any) => t.category || t.l1 || t.name || t.Category).filter(Boolean);
-                return [...new Set(names)] as string[];
-            }
-            return [...TAXONOMY];
-        }
-        const seen = new Set<string>();
-        for (const row of localData) {
-            const v = String(row[categoryCol] ?? '').trim();
-            if (v && v !== 'Uncategorized' && v !== 'Other / Review') seen.add(v);
-        }
-        return [...seen].sort();
-    }, [activeLevel, customTaxonomy, localData, categoryCol]);
 
     // Auto-categorization (HSN -> keyword -> optional AI). Fills empty categories only.
     const [autoBusy, setAutoBusy] = useState(false);
@@ -110,13 +77,10 @@ const CategoryMapper: React.FC<CategoryMapperProps> = ({ data, mappings, onCompl
                 const { l2, l3 } = resolveSubLevels(res.category, String(row[hsnKey] ?? ''), String(row[descKey] ?? ''));
                 return { ...row, [categoryCol]: res.category, category_l2: l2, category_l3: l3 };
             });
-            // Apply the user's own remembered rules to fill remaining unmapped items.
-            const ruled = applyUserRules(next, { descKey, catCol: categoryCol, level: activeLevel }, userRules);
-            setLocalData(ruled.rows);
+            setLocalData(next);
             setAutoSummary(
                 `Auto-categorized — HSN ${by.hsn || 0}, keyword ${by.keyword || 0}, ` +
-                `AI ${by.ai || 0}` + (ruled.applied ? `, your rules ${ruled.applied}` : '') +
-                `, review ${Math.max(0, (by.unmapped || 0) - ruled.applied)}.`,
+                `AI ${by.ai || 0}, review ${by.unmapped || 0}.`,
             );
         } finally {
             setAutoBusy(false);
@@ -155,27 +119,6 @@ const CategoryMapper: React.FC<CategoryMapperProps> = ({ data, mappings, onCompl
             categorizedSpend
         };
     }, [localData, categoryCol, mappings]);
-
-    // Top uncategorized item descriptions by spend — drives keyword-rule writing:
-    // these are the exact descriptions a new rule should target next.
-    const uncategorizedTop = useMemo(() => {
-        const amtCol = mappings['amount'];
-        const isUncat = (c: any) => !c || String(c).trim() === '' || c === 'Uncategorized' || c === 'Other / Review';
-        const grp = new Map<string, { spend: number; count: number }>();
-        for (const row of localData) {
-            if (!isUncat(row[categoryCol])) continue;
-            const desc = String(row[descriptionCol] || 'Unknown Item').trim() || 'Unknown Item';
-            let amt = 0;
-            if (amtCol && row[amtCol]) amt = parseFloat(String(row[amtCol]).replace(/[^0-9.-]+/g, '')) || 0;
-            const g = grp.get(desc) ?? { spend: 0, count: 0 };
-            g.spend += amt; g.count += 1; grp.set(desc, g);
-        }
-        return [...grp.entries()]
-            .map(([desc, g]) => ({ desc, ...g }))
-            .sort((a, b) => b.spend - a.spend)
-            .slice(0, 20);
-    }, [localData, categoryCol, descriptionCol, mappings]);
-    const [showUncatReview, setShowUncatReview] = useState(false);
 
     // Unique uncategorized descriptions to group by (Auto-clustering for efficiency)
     const pendingItems = useMemo(() => {
@@ -246,16 +189,6 @@ const CategoryMapper: React.FC<CategoryMapperProps> = ({ data, mappings, onCompl
             updated[id] = { ...updated[id], [categoryCol]: newCategory };
         });
         setLocalData(updated);
-
-        // Part B: remember this mapping so future files auto-apply it (local + Firestore sync).
-        if (rememberRule && itemDesc) {
-            const key = itemDesc.split('[')[0].trim();
-            if (key) {
-                const next = saveUserRule(scope, { key, category: newCategory, level: activeLevel });
-                setUserRules(next);
-                void persistUserRulesToCloud(scope, next);
-            }
-        }
     };
 
     const handleTaxonomyUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -419,51 +352,6 @@ const CategoryMapper: React.FC<CategoryMapperProps> = ({ data, mappings, onCompl
                 </div>
             </div>
 
-            {/* Uncategorized review — top unmapped descriptions by spend (drives keyword-rule writing) */}
-            {stats.uncategorized > 0 && uncategorizedTop.length > 0 && (
-                <div className="bg-amber-500/5 border border-amber-500/30 rounded-2xl p-4">
-                    <button
-                        onClick={() => setShowUncatReview(v => !v)}
-                        className="w-full flex items-center justify-between text-left"
-                    >
-                        <span className="text-sm font-bold text-amber-400">
-                            {stats.uncategorized} uncategorized items — top descriptions needing a keyword rule
-                        </span>
-                        <span className="text-xs text-amber-400/80">{showUncatReview ? 'Hide ▲' : 'Show ▼'}</span>
-                    </button>
-                    {showUncatReview && (
-                        <div className="mt-3">
-                            <p className="text-[11px] text-zinc-500 mb-2">
-                                These are the highest-spend items HSN + keywords couldn't classify. Add the recurring words to
-                                <span className="text-zinc-300"> src/utils/categorization/keywordRules.ts</span>, then re-run Auto-categorize.
-                            </p>
-                            <div className="max-h-72 overflow-auto rounded-lg border border-zinc-800">
-                                <table className="w-full text-xs">
-                                    <thead className="bg-zinc-900 text-zinc-500 sticky top-0">
-                                        <tr>
-                                            <th className="text-left font-bold px-3 py-2">Item Description</th>
-                                            <th className="text-right font-bold px-3 py-2">Rows</th>
-                                            <th className="text-right font-bold px-3 py-2">Spend</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {uncategorizedTop.map((u, i) => (
-                                            <tr key={i} className="border-t border-zinc-800/60">
-                                                <td className="px-3 py-1.5 text-zinc-300">{u.desc}</td>
-                                                <td className="px-3 py-1.5 text-right text-zinc-500">{u.count}</td>
-                                                <td className="px-3 py-1.5 text-right text-zinc-400">
-                                                    {new Intl.NumberFormat('en-IN', { style: 'currency', currency, maximumFractionDigits: 0 }).format(u.spend)}
-                                                </td>
-                                            </tr>
-                                        ))}
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-                    )}
-                </div>
-            )}
-
             {/* Filter & Search */}
             <div className="bg-zinc-900/50 border border-zinc-800 rounded-2xl p-4 flex justify-between items-center backdrop-blur-sm">
                 <div className="flex items-center gap-2 bg-zinc-950/50 border border-zinc-800 rounded-xl px-4 py-2 w-96">
@@ -500,16 +388,6 @@ const CategoryMapper: React.FC<CategoryMapperProps> = ({ data, mappings, onCompl
                             {applyToSimilar && <Check className="h-3 w-3 text-white" />}
                         </div>
                         <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Apply to Similar</span>
-                    </label>
-
-                    <label className="flex items-center gap-2 cursor-pointer group" title="Remember this mapping and auto-apply it to matching items in future uploads">
-                        <div className={cn(
-                            "w-4 h-4 rounded border flex items-center justify-center transition-all",
-                            rememberRule ? "bg-primary border-primary" : "border-zinc-700 bg-zinc-950 group-hover:border-zinc-500"
-                        )} onClick={() => setRememberRule(!rememberRule)}>
-                            {rememberRule && <Check className="h-3 w-3 text-white" />}
-                        </div>
-                        <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Remember for future files{userRules.length ? ` (${userRules.length})` : ''}</span>
                     </label>
 
                     <label className="flex items-center gap-2 px-3 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg cursor-pointer hover:border-primary/50 transition-all text-[10px] font-bold text-zinc-400 uppercase tracking-widest">
@@ -558,37 +436,29 @@ const CategoryMapper: React.FC<CategoryMapperProps> = ({ data, mappings, onCompl
                             </div>
 
                             <div className="relative">
-                                {activeLevel === 'l1' ? (
-                                    // L1 — strict dropdown of valid categories (foolproof, no typos)
-                                    <select
-                                        defaultValue=""
-                                        onChange={(e) => { if (e.target.value) handleAssignCategory(group.ids, e.target.value, group.desc); }}
-                                        className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-4 py-2 text-sm text-white focus:ring-1 focus:ring-primary focus:border-primary transition-all appearance-none cursor-pointer"
-                                    >
-                                        <option value="" disabled>Pick a category…</option>
-                                        {pickerOptions.map((opt) => (<option key={opt} value={opt}>{opt}</option>))}
-                                    </select>
-                                ) : (
-                                    // L2/L3 — combobox: pick a suggestion or type a new value
-                                    <>
-                                        <input
-                                            type="text"
-                                            list="dd-cat-options"
-                                            placeholder={`Assign ${activeLevel.toUpperCase()}… (pick or type)`}
-                                            onKeyDown={(e) => { if (e.key === 'Enter') handleAssignCategory(group.ids, e.currentTarget.value, group.desc); }}
-                                            onChange={(e) => { const v = e.currentTarget.value; if (pickerOptions.includes(v)) handleAssignCategory(group.ids, v, group.desc); }}
-                                            className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-4 py-2 text-sm text-white focus:ring-1 focus:ring-primary focus:border-primary transition-all"
-                                        />
-                                        <div className="absolute right-3 top-2.5 text-[10px] text-zinc-600 font-bold uppercase pointer-events-none">Pick / Enter</div>
-                                    </>
+                                <input
+                                    type="text"
+                                    placeholder={`Assign ${activeLevel.toUpperCase()}...`}
+                                    onKeyDown={(e) => {
+                                        if (e.key === 'Enter') {
+                                            handleAssignCategory(group.ids, e.currentTarget.value, group.desc);
+                                        }
+                                    }}
+                                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-4 py-2 text-sm text-white focus:ring-1 focus:ring-primary focus:border-primary transition-all"
+                                />
+                                {customTaxonomy && (
+                                    <div className="absolute right-3 top-2.5 flex items-center gap-1 text-[10px] text-primary font-bold uppercase pointer-events-none">
+                                        <Sparkles className="h-3 w-3" /> Taxonomy Smart
+                                    </div>
+                                )}
+                                {!customTaxonomy && (
+                                    <div className="absolute right-3 top-2.5 text-[10px] text-zinc-600 font-bold uppercase pointer-events-none">
+                                        Press Enter
+                                    </div>
                                 )}
                             </div>
                         </div>
                     ))}
-                {/* Shared suggestions for the L2/L3 combobox */}
-                <datalist id="dd-cat-options">
-                    {pickerOptions.map((opt) => (<option key={opt} value={opt} />))}
-                </datalist>
 
                 {pendingItems.length > RENDER_CAP && (
                     <div className="col-span-full py-4 text-center text-zinc-500 text-sm">
