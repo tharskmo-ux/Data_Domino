@@ -81,6 +81,8 @@ describe('ExcelGenerator — 11-sheet report', () => {
     expect(t).toContain('FIRM SAVINGS');
     expect(t).toContain('INDICATIVE LEVERS');
     expect(t).toContain('How this number is calculated');
+    expect(t).toContain('Effort');          // effort column mirrors the app's Quick-win/Strategic split
+    expect(t).toContain('Strategic');
     expect(t).not.toMatch(/see note/i);
   });
 

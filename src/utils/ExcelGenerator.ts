@@ -713,27 +713,28 @@ export class ExcelGenerator {
     // -----------------------------------------------------------------------
     private createSavings(_stats: ReturnType<ExcelGenerator['buildStats']>) {
         const ws = this.wb.addWorksheet(SHEETS.savings, { views: [{ showGridLines: false }] });
-        const widths = [26, 50, 18, 40, 46];
+        const widths = [24, 13, 46, 16, 16, 40];
         widths.forEach((w, i) => (ws.getColumn(i + 1).width = w));
 
         this.styleTitle(ws.getCell('A1'), 'Savings Opportunities');
         const intro = ws.getCell('A2');
-        intro.value = 'Where procurement spend can be reduced. Section A = firm, defensible numbers to negotiate now. Section B = indicative levers that need validation. Every figure shows exactly how it was calculated.';
+        intro.value = 'Where procurement spend can be reduced. Section A = firm, defensible numbers to negotiate now. Section B = indicative levers that need validation. The "Effort" column mirrors the app: Quick win = fast commercial change (no re-sourcing); Strategic = needs negotiation / RFQ / a supplier programme.';
         intro.font = { italic: true, color: { argb: SUBTLE_TEXT } };
-        ws.mergeCells('A2:E2');
+        ws.mergeCells('A2:F2');
         intro.alignment = { wrapText: true };
 
         // Single source of truth — same model the dashboard "Savings Roadmap" renders.
         const model = computeSavingsModel(this.data, this.m);
         const firmLevers = model.levers.filter(l => l.tier === 'firm');
         const indicativeLevers = model.levers.filter(l => l.tier === 'indicative' && l.saving > 0);
+        const effort = (g: string) => (g === 'quickwin' ? 'Quick win' : 'Strategic');
 
         // Headline number
         let r = 4;
         const head = ws.getCell(`A${r}`);
         head.value = `Firm, defensible saving: ${this.fmtCr(model.firmSaving)}  —  from Section A. Indicative upside (Section B): ${this.fmtCr(model.indicativeSaving)}, subject to validation.`;
         head.font = { bold: true, size: 14, color: { argb: TITLE_TEXT } };
-        ws.mergeCells(`A${r}:E${r}`);
+        ws.mergeCells(`A${r}:F${r}`);
         r += 2;
 
         // ---- SECTION A — firm, negotiable now ----
@@ -741,28 +742,28 @@ export class ExcelGenerator {
         ws.getCell(`A${r}`).font = { bold: true, size: 12, color: { argb: HEADER_FILL } };
         r++;
         let hdr = ws.getRow(r);
-        hdr.values = ['Opportunity', 'How this number is calculated', 'Spend involved (Rs)', 'Est. saving (Rs)', 'What to do'];
+        hdr.values = ['Opportunity', 'Effort', 'How this number is calculated', 'Spend involved (Rs)', 'Est. saving (Rs)', 'What to do'];
         this.styleHeaderRow(hdr); r++;
         const firstQ = r;
         for (const lever of firmLevers) {
             const xr = ws.getRow(r);
             xr.values = [
-                lever.label, lever.how, lever.basisSpend, lever.saving,
+                lever.label, effort(lever.group), lever.how, lever.basisSpend, lever.saving,
                 lever.key === 'freight'
                     ? 'Ask key vendors for delivered (FOR) prices so freight is built into the unit rate.'
                     : 'Confirm items are the same spec, then shift volume to the lowest in-year vendor rate.',
             ] as unknown as ExcelJS.CellValue[];
-            xr.getCell(3).numFmt = '#,##0'; xr.getCell(4).numFmt = '#,##0';
+            xr.getCell(4).numFmt = '#,##0'; xr.getCell(5).numFmt = '#,##0';
             xr.alignment = { vertical: 'top', wrapText: true };
             ws.getRow(r).height = 46;
             r++;
         }
         const tot = ws.getRow(r);
         tot.getCell(1).value = 'TOTAL — Section A (firm)';
-        tot.getCell(4).value = { formula: `SUM(D${firstQ}:D${r - 1})` };
-        tot.getCell(4).numFmt = '#,##0';
-        tot.getCell(1).font = { bold: true }; tot.getCell(4).font = { bold: true };
-        [1, 3, 4].forEach((c) => { tot.getCell(c).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: TOTAL_FILL } }; });
+        tot.getCell(5).value = { formula: `SUM(E${firstQ}:E${r - 1})` };
+        tot.getCell(5).numFmt = '#,##0';
+        tot.getCell(1).font = { bold: true }; tot.getCell(5).font = { bold: true };
+        [1, 4, 5].forEach((c) => { tot.getCell(c).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: TOTAL_FILL } }; });
         r += 3;
 
         // ---- SECTION B — indicative levers (quantified, need validation) ----
@@ -770,7 +771,7 @@ export class ExcelGenerator {
         ws.getCell(`A${r}`).font = { bold: true, size: 12, color: { argb: HEADER_FILL } };
         r++;
         hdr = ws.getRow(r);
-        hdr.values = ['Opportunity', 'How this number is calculated', 'Spend involved (Rs)', 'Indicative saving (Rs)', 'What to do'];
+        hdr.values = ['Opportunity', 'Effort', 'How this number is calculated', 'Spend involved (Rs)', 'Indicative saving (Rs)', 'What to do'];
         this.styleHeaderRow(hdr); r++;
         const firstB = r;
         const actionByKey: Record<string, string> = {
@@ -782,9 +783,9 @@ export class ExcelGenerator {
         for (const lever of indicativeLevers) {
             const xr = ws.getRow(r);
             xr.values = [
-                lever.label, lever.how, lever.basisSpend, lever.saving, actionByKey[lever.key] ?? '',
+                lever.label, effort(lever.group), lever.how, lever.basisSpend, lever.saving, actionByKey[lever.key] ?? '',
             ] as unknown as ExcelJS.CellValue[];
-            xr.getCell(3).numFmt = '#,##0'; xr.getCell(4).numFmt = '#,##0';
+            xr.getCell(4).numFmt = '#,##0'; xr.getCell(5).numFmt = '#,##0';
             xr.alignment = { vertical: 'top', wrapText: true };
             ws.getRow(r).height = 52;
             r++;
@@ -792,16 +793,16 @@ export class ExcelGenerator {
         if (indicativeLevers.length) {
             const tb = ws.getRow(r);
             tb.getCell(1).value = 'TOTAL — Section B (indicative)';
-            tb.getCell(4).value = { formula: `SUM(D${firstB}:D${r - 1})` };
-            tb.getCell(4).numFmt = '#,##0';
-            tb.getCell(1).font = { bold: true }; tb.getCell(4).font = { bold: true };
-            [1, 3, 4].forEach((c) => { tb.getCell(c).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: TOTAL_FILL } }; });
+            tb.getCell(5).value = { formula: `SUM(E${firstB}:E${r - 1})` };
+            tb.getCell(5).numFmt = '#,##0';
+            tb.getCell(1).font = { bold: true }; tb.getCell(5).font = { bold: true };
+            [1, 4, 5].forEach((c) => { tb.getCell(c).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: TOTAL_FILL } }; });
             r++;
         }
         const note = ws.getCell(`A${r + 1}`);
         note.value = 'Note: Section B levers are indicative upper bounds on distinct pools of spend (each rupee counted once). Firm the rates through RFQs / negotiations before committing.';
         note.font = { italic: true, color: { argb: SUBTLE_TEXT } };
-        ws.mergeCells(`A${r + 1}:E${r + 1}`);
+        ws.mergeCells(`A${r + 1}:F${r + 1}`);
         (ws.getCell(`A${r + 1}`)).alignment = { wrapText: true };
     }
 
